@@ -11,7 +11,7 @@
     "lint": "eslint .",
     "typecheck": "tsc",
     "test": "vitest run",
-    "synth": "cdk synth -c environment=test -c githubOwner=jross24"
+    "synth": "cdk synth -c environment=test -c githubOwner=jross24 -c githubOwnerId=72766718"
   },
   "dependencies": {
     "aws-cdk-lib": "^2.272.0",
