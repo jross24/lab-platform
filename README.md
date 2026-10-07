@@ -26,8 +26,12 @@ The token from GitHub has a `sub` claim. It says which repository and which GitH
 The trust policy of `github-deploy` accepts only this pattern:
 
 ```
-repo:<githubOwner>/lab-*:environment:<environment>
+repo:<githubOwner>@<githubOwnerId>/lab-*:environment:<environment>
 ```
+
+GitHub adds numeric IDs to the claim for new repositories, for example `repo:my-org@1234/lab-web@5678:environment:test`.
+A name can move to a new owner, but an ID cannot, so the pattern includes the owner ID.
+Read the real prefix of a repository with `gh api repos/<owner>/<repo>/actions/oidc/customization/sub`.
 
 So a job can assume the role only if both of these are true:
 
@@ -55,7 +59,7 @@ npm run synth
 `npm run synth` synthesises the stack for `test`. For a different environment, give the context values:
 
 ```
-npx cdk synth -c environment=staging -c githubOwner=<github-owner>
+npx cdk synth -c environment=staging -c githubOwner=<github-owner> -c githubOwnerId=<github-owner-id>
 ```
 
 `environment` must be `test`, `staging` or `production`. Synthesis does not need AWS credentials.
@@ -69,7 +73,7 @@ Run `cdk bootstrap` first. It creates the bootstrap roles that `github-deploy` a
 
 ```
 npx cdk bootstrap --profile lab-test
-npx cdk deploy -c environment=test -c githubOwner=<github-owner> --profile lab-test
+npx cdk deploy -c environment=test -c githubOwner=<github-owner> -c githubOwnerId=<github-owner-id> --profile lab-test
 ```
 
 Do the same for `staging` and `production`, each with its own profile and its own `environment` value.

@@ -10,7 +10,7 @@ const BOOTSTRAP_QUALIFIER = 'hnb659fds';
 
 export class PlatformStack extends Stack {
   constructor(scope: Construct, config: Config) {
-    const { environment, githubOwner } = config;
+    const { environment, githubOwner, githubOwnerId } = config;
     super(scope, 'Platform', { stackName: `lab-platform-${environment}` });
 
     const provider = new iam.OidcProviderNative(this, 'GitHubOidcProvider', {
@@ -24,7 +24,7 @@ export class PlatformStack extends Stack {
       assumedBy: new iam.OpenIdConnectPrincipal(provider, {
         StringEquals: { [`${GITHUB_ISSUER}:aud`]: STS_AUDIENCE },
         StringLike: {
-          [`${GITHUB_ISSUER}:sub`]: `repo:${githubOwner}/lab-*:environment:${environment}`,
+          [`${GITHUB_ISSUER}:sub`]: `repo:${githubOwner}@${githubOwnerId}/lab-*:environment:${environment}`,
         },
       }),
     });

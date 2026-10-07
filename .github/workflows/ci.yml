@@ -26,7 +26,8 @@ jobs:
       - name: cdk synth for each environment
         env:
           GITHUB_OWNER: ${{ github.repository_owner }}
+          GITHUB_OWNER_ID: ${{ github.repository_owner_id }}
         run: |
           for environment in test staging production; do
-            npx cdk synth --quiet -c "environment=$environment" -c "githubOwner=$GITHUB_OWNER"
+            npx cdk synth --quiet -c "environment=$environment" -c "githubOwner=$GITHUB_OWNER" -c "githubOwnerId=$GITHUB_OWNER_ID"
           done

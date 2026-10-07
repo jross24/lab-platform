@@ -7,7 +7,7 @@ import type { Environment } from '../lib/config.ts';
 const ISSUER = 'token.actions.githubusercontent.com';
 
 function synth(environment: Environment, githubOwner = 'jross24') {
-  const stack = new PlatformStack(new App(), { environment, githubOwner });
+  const stack = new PlatformStack(new App(), { environment, githubOwner, githubOwnerId: '1001' });
   return { stack, template: Template.fromStack(stack) };
 }
 
@@ -58,7 +58,7 @@ describe.each<Environment>(['test', 'staging', 'production'])('PlatformStack for
             Principal: { Federated: { Ref: providerId } },
             Condition: {
               StringEquals: { [`${ISSUER}:aud`]: 'sts.amazonaws.com' },
-              StringLike: { [`${ISSUER}:sub`]: `repo:jross24/lab-*:environment:${environment}` },
+              StringLike: { [`${ISSUER}:sub`]: `repo:jross24@1001/lab-*:environment:${environment}` },
             },
           },
         ],
@@ -93,7 +93,7 @@ describe('sub condition', () => {
         Statement: [
           Match.objectLike({
             Condition: Match.objectLike({
-              StringLike: { [`${ISSUER}:sub`]: 'repo:some-org/lab-*:environment:staging' },
+              StringLike: { [`${ISSUER}:sub`]: 'repo:some-org@1001/lab-*:environment:staging' },
             }),
           }),
         ],
