@@ -1,4 +1,4 @@
-import { CfnOutput, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { ArnFormat, CfnOutput, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import type { Construct } from 'constructs';
@@ -39,6 +39,21 @@ export class PlatformStack extends Stack {
             region: '',
             resource: 'role',
             resourceName: `cdk-${BOOTSTRAP_QUALIFIER}-*`,
+          }),
+        ],
+      }),
+    );
+
+    // The end-to-end job reads the URL of each application from SSM. The role cannot write, list or delete.
+    deployRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ['ssm:GetParameter', 'ssm:GetParameters'],
+        resources: [
+          this.formatArn({
+            service: 'ssm',
+            resource: 'parameter',
+            resourceName: 'lab/*',
+            arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
           }),
         ],
       }),

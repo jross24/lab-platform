@@ -22,6 +22,35 @@ const assumeBootstrapRoles = {
   },
 };
 
+// The end-to-end job reads the three URL parameters of the lab. It cannot write or list any parameter.
+const readLabParameters = {
+  Action: ['ssm:GetParameter', 'ssm:GetParameters'],
+  Effect: 'Allow',
+  Resource: {
+    'Fn::Join': [
+      '',
+      [
+        'arn:',
+        { Ref: 'AWS::Partition' },
+        ':ssm:',
+        { Ref: 'AWS::Region' },
+        ':',
+        { Ref: 'AWS::AccountId' },
+        ':parameter/lab/*',
+      ],
+    ],
+  },
+};
+
+function allStatements(template: Template): Array<{ Action: string | string[]; Effect: string; Resource: unknown }> {
+  const policies = Object.values(template.findResources('AWS::IAM::Policy'));
+  return policies.flatMap((policy) => policy.Properties.PolicyDocument.Statement);
+}
+
+function actionsOf(template: Template): string[] {
+  return allStatements(template).flatMap((statement) => [statement.Action].flat());
+}
+
 describe.each<Environment>(['test', 'staging', 'production'])('PlatformStack for %s', (environment) => {
   const { stack, template } = synth(environment);
 
@@ -105,10 +134,11 @@ describe('sub condition', () => {
 describe.each<Environment>(['staging', 'production'])('permissions for %s', (environment) => {
   const { template } = synth(environment);
 
-  it('allows sts:AssumeRole only on the CDK bootstrap roles', () => {
+  it('allows sts:AssumeRole on the CDK bootstrap roles and an SSM read of /lab/* and nothing else', () => {
     template.hasResourceProperties('AWS::IAM::Policy', {
-      PolicyDocument: { Version: '2012-10-17', Statement: [assumeBootstrapRoles] },
+      PolicyDocument: { Version: '2012-10-17', Statement: [assumeBootstrapRoles, readLabParameters] },
     });
+    expect(actionsOf(template)).toEqual(['sts:AssumeRole', 'ssm:GetParameter', 'ssm:GetParameters']);
   });
 
   it('has no lock table and no DynamoDB permission', () => {
@@ -136,13 +166,14 @@ describe('permissions for test', () => {
     });
   });
 
-  it('allows the bootstrap roles and three item actions on the lock table only', () => {
+  it('allows the bootstrap roles, the SSM read and three item actions on the lock table only', () => {
     const tableId = Object.keys(template.findResources('AWS::DynamoDB::Table'))[0];
     template.hasResourceProperties('AWS::IAM::Policy', {
       PolicyDocument: {
         Version: '2012-10-17',
         Statement: [
           assumeBootstrapRoles,
+          readLabParameters,
           {
             Action: ['dynamodb:PutItem', 'dynamodb:GetItem', 'dynamodb:DeleteItem'],
             Effect: 'Allow',
@@ -151,5 +182,21 @@ describe('permissions for test', () => {
         ],
       },
     });
+  });
+});
+
+describe.each<Environment>(['test', 'staging', 'production'])('SSM permission for %s', (environment) => {
+  const { template } = synth(environment);
+
+  it('reads parameters under /lab/ only, with no wildcard resource', () => {
+    const ssm = allStatements(template).filter((statement) => [statement.Action].flat().some((a) => a.startsWith('ssm:')));
+    expect(ssm).toEqual([readLabParameters]);
+    expect(JSON.stringify(ssm)).not.toContain('parameter/*');
+    expect(JSON.stringify(ssm)).not.toContain('"Resource":"*"');
+  });
+
+  it('allows no SSM write, list or delete action', () => {
+    const ssmActions = actionsOf(template).filter((action) => action.startsWith('ssm:'));
+    expect(ssmActions).toEqual(['ssm:GetParameter', 'ssm:GetParameters']);
   });
 });
