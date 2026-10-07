@@ -42,6 +42,7 @@ A job that names no GitHub environment cannot assume the role, whatever branch i
 Protection rules on the GitHub environment, such as a required reviewer, then control who can deploy.
 
 The role itself can do very little. It can assume the CDK bootstrap roles (`cdk-hnb659fds-*`) of its own account.
+It can also read the SSM parameters under `/lab/` of its own account (`ssm:GetParameter` and `ssm:GetParameters`). The end-to-end job of [lab-e2e](https://github.com/jross24/lab-e2e) reads the URL of each application there. The role cannot write, list or delete a parameter.
 In `test` it can also put, get and delete items in the lock table.
 
 ## Run the checks locally
