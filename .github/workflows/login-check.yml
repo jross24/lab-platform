@@ -1,0 +1,43 @@
+name: login check
+
+# Proves the OIDC login: each environment reaches its own account,
+# and a job outside an environment cannot assume a deploy role.
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  allowed:
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [test, staging, production]
+    runs-on: ubuntu-latest
+    environment: ${{ matrix.environment }}
+    steps:
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-deploy
+          aws-region: ${{ vars.AWS_REGION }}
+          mask-aws-account-id: true
+      - run: aws sts get-caller-identity --query Arn --output text
+
+  denied:
+    runs-on: ubuntu-latest
+    steps:
+      - id: login
+        continue-on-error: true
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.CHECK_TEST_ACCOUNT_ID }}:role/github-deploy
+          aws-region: ${{ vars.AWS_REGION }}
+          mask-aws-account-id: true
+          retry-max-attempts: 1
+      - name: fail if the login worked
+        if: steps.login.outcome != 'failure'
+        run: |
+          echo "A job with no environment assumed the deploy role. The trust policy is too wide."
+          exit 1
