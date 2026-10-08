@@ -31,3 +31,98 @@ jobs:
           for environment in test staging production dev; do
             npx cdk synth --quiet -c "environment=$environment" -c "githubOwner=$GITHUB_OWNER" -c "githubOwnerId=$GITHUB_OWNER_ID"
           done
+
+  # The same scans as the service repositories get from the shared pr workflow. This repository cannot call that
+  # workflow, because its cdk synth needs the context values of an environment.
+  dependencies:
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+          fail-on-scopes: runtime, development
+          license-check: false
+          show-patched-versions: true
+
+  secrets:
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: jross24/lab-workflows/actions/install-tool@main
+        with:
+          tool: gitleaks
+      - uses: jross24/lab-workflows/actions/secret-scan@main
+
+  actionlint:
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: changes
+        uses: jross24/lab-workflows/actions/changed-paths@main
+        with:
+          paths: .github/
+          label: actionlint
+      - if: steps.changes.outputs.changed == 'true'
+        uses: jross24/lab-workflows/actions/install-tool@main
+        with:
+          tool: actionlint
+      - if: steps.changes.outputs.changed == 'true'
+        run: actionlint
+
+  # Shows what a merge would change in each account, as one comment for each account (lab-platform#23, lab-platform#13).
+  # The shared workflow reads the deployed templates with the read-only role github-pr-diff.
+  # The dev account is in the list too: the pipeline does not deploy it, so the comment shows when dev is behind main.
+  # The stack PlatformRoot also shows. A change there needs a manual deployment, see the README.
+  # A delete or a replacement of a stateful resource (for example the lock table in test) fails the job
+  # until the pull request has the label destructive-change-approved.
+  diff:
+    name: diff ${{ matrix.environment }}
+    if: ${{ github.event_name == 'pull_request' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - environment: test
+            secret: PR_ACCOUNT_ID_TEST
+            stacks: lab-platform-test lab-platform-root-test
+          - environment: staging
+            secret: PR_ACCOUNT_ID_STAGING
+            stacks: lab-platform-staging lab-platform-root-staging
+          - environment: production
+            secret: PR_ACCOUNT_ID_PRODUCTION
+            stacks: lab-platform-production lab-platform-root-production
+          - environment: dev
+            secret: PR_ACCOUNT_ID_DEV
+            stacks: lab-platform-dev
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    uses: jross24/lab-workflows/.github/workflows/diff.yml@main
+    with:
+      stage: ''
+      account-secret: ${{ matrix.secret }}
+      stack-names: ${{ matrix.stacks }}
+      synth-args: -c environment=${{ matrix.environment }} -c githubOwner=${{ github.repository_owner }} -c githubOwnerId=${{ github.repository_owner_id }}
+      title: cdk diff against ${{ matrix.environment }}
+      key: ${{ matrix.environment }}
+      pass-version: false
+    secrets: inherit

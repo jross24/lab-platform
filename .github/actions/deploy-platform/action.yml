@@ -1,0 +1,79 @@
+name: deploy platform
+description: Deploys the Platform stack of one account, then proves that the release role of the services can still log in.
+
+# The job must check out the repository first, and it must name the GitHub environment of the account.
+# The steps are in an action and not in the workflow file, so the three jobs of deploy.yml share them.
+# The claim job_workflow_ref of the token is still deploy.yml, because the job is in that file.
+inputs:
+  environment:
+    description: The environment to deploy, one of test, staging and production.
+    required: true
+  account-id:
+    description: The ID of the AWS account. The job passes the secret AWS_ACCOUNT_ID of its GitHub environment.
+    required: true
+  region:
+    description: The AWS region.
+    required: true
+  owner:
+    description: The GitHub owner of the repositories, for the trust policies.
+    required: true
+  owner-id:
+    description: The numeric ID of the GitHub owner.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        node-version: 22
+        cache: npm
+
+    # The code is the code of main, and a person reviewed it. A deploy needs no install script.
+    - shell: bash
+      run: npm ci --ignore-scripts
+
+    - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+      with:
+        role-to-assume: arn:aws:iam::${{ inputs.account-id }}:role/github-platform-deploy
+        aws-region: ${{ inputs.region }}
+        mask-aws-account-id: true
+
+    # Only the stack Platform. The stack PlatformRoot holds the role that this job runs as, and a person deploys it.
+    - name: cdk deploy Platform
+      shell: bash
+      env:
+        ENVIRONMENT: ${{ inputs.environment }}
+        OWNER: ${{ inputs.owner }}
+        OWNER_ID: ${{ inputs.owner-id }}
+      run: |
+        npx cdk deploy Platform --require-approval never \
+          -c "environment=${ENVIRONMENT}" -c "githubOwner=${OWNER}" -c "githubOwnerId=${OWNER_ID}"
+
+    # A change of this stack can break the login of the release workflows (the role github-deploy and the OIDC provider).
+    # This step logs in as a service release job would: from a job in the GitHub environment of the account.
+    # If it fails, the next environment does not deploy, so a bad change stops in Test.
+    - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+      with:
+        role-to-assume: arn:aws:iam::${{ inputs.account-id }}:role/github-deploy
+        aws-region: ${{ inputs.region }}
+        mask-aws-account-id: true
+
+    - name: check that the release role works
+      shell: bash
+      env:
+        ENVIRONMENT: ${{ inputs.environment }}
+      run: |
+        arn="$(aws sts get-caller-identity --query Arn --output text)"
+        case "$arn" in
+          *":assumed-role/github-deploy/"*) ;;
+          *)
+            echo "::error::The login did not give the role github-deploy."
+            exit 1
+            ;;
+        esac
+        {
+          echo "### Platform stack of ${ENVIRONMENT} is deployed"
+          echo
+          echo "The role github-deploy can still log in from a job in the GitHub environment ${ENVIRONMENT}."
+        } >> "$GITHUB_STEP_SUMMARY"

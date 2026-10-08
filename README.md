@@ -127,6 +127,72 @@ So the role lives in its own stack. The pipeline deploys `Platform` and never `P
 The OIDC provider is in `Platform`, because it was there first. It has `DeletionPolicy: Retain` and `UpdateReplacePolicy: Retain`.
 If a change removes or replaces it in the template, the real provider stays in the account, and the login keeps working.
 
+## The pipeline of this repository
+
+A merge to `main` deploys the stack `Platform` to `test`, then to `staging`, then to `production`. The workflow is `.github/workflows/deploy.yml`.
+Each job runs in the GitHub environment of its account. The environment `production` has a required reviewer, so the last job waits until he approves.
+
+```
+merge to main -> deploy-test -> deploy-staging -> deploy-production (waits for the reviewer)
+```
+
+Each job does four things:
+
+1. It logs in as `github-platform-deploy` (OIDC). That role can assume the CDK deploy role and the CDK file publishing role of its own account, and nothing else.
+2. It runs `cdk deploy Platform`.
+3. It logs in again as `github-deploy`, the role of the release workflows, from a job in the same GitHub environment.
+4. It checks that the login gave `github-deploy`.
+
+Step 3 is the safety net. A change of this stack can break the login of every service release: a wrong trust policy, a lost OIDC provider.
+If step 3 fails in `test`, `staging` and `production` never start. A bad change stops in the account that has the least value.
+
+A pull request shows the effect first. The workflow `ci` posts one `cdk diff` comment for each account (`test`, `staging`, `production` and `dev`), from the shared workflow of [lab-workflows](https://github.com/jross24/lab-workflows).
+The comment compares the pull request with the stacks that run now. The stateful change guard applies: a delete or a replacement of a stateful resource, such as the lock table in `test`, fails the check until someone adds the label `destructive-change-approved`.
+
+### The hard part: the pipeline changes the role that it runs as
+
+The pipeline logs in with a role that this repository creates. A change to that role could lock the pipeline out, and then the pipeline could not repair itself. The lab decided this:
+
+| What | Who changes it | How |
+| --- | --- | --- |
+| `github-deploy`, `github-pr-diff`, the lock table (stack `Platform`) | The pipeline | A merge to `main` |
+| The OIDC provider (stack `Platform`) | The pipeline, but it cannot remove it | `DeletionPolicy: Retain` keeps the real provider if a change removes it from the template |
+| `github-platform-deploy`, the role of the pipeline (stack `PlatformRoot`) | A person, from a laptop | `cdk deploy PlatformRoot` with an administrator profile |
+| The `dev` account (stack `Platform`) | A person, from a laptop | `cdk deploy Platform` with the profile `lab-dev` |
+| The CDK bootstrap roles | A person, from a laptop | `cdk bootstrap` |
+| The GitHub environments, the rulesets, the secrets | A person | The GitHub settings |
+
+So the pipeline may change almost everything about the platform, but not the role it logs in with. The code of that role is in `lib/root-stack.ts`, in a stack that `deploy.yml` never names.
+A pull request that changes `lib/root-stack.ts` still shows a diff for `PlatformRoot` in its comment. That is the sign that someone must deploy by hand after the merge.
+
+What this separation does and does not give:
+
+- **It prevents accidents.** A change to the usual file of the platform cannot change the trust policy of the pipeline by mistake.
+- **It does not stop a malicious change.** The pipeline deploys through the CDK bootstrap roles. The CloudFormation execution role has `AdministratorAccess`. A pull request that a reviewer merges could attach a policy to the pipeline role from `Platform`.
+  The protection is the review of the pull request, the `cdk diff` comment, and the required reviewer on `production`. It is not a technical block.
+- **A technical block would be a service control policy.** It would deny every change to `role/github-platform-deploy` except for the administrator role of the SSO. The lab does not build it. A wrong policy at the level of the organisation could lock out the administrator.
+
+### Why the dev account is not in the pipeline
+
+The `dev` account holds the baseline services and the previews. It has no release path. The roles in it change rarely, and a bad change there harms nothing but the previews.
+A person deploys it from a laptop. The comment of a pull request still shows the diff for `dev`, so a person sees when `dev` is behind `main`.
+
+### Recover from a bad change
+
+1. **The deployment fails.** CloudFormation rolls the stack back to the last good state. The job fails and the next environment does not start. Fix the code and merge again.
+2. **The deployment works but breaks something** (for example, a service release cannot log in). The check in step 3 should stop it in `test`. If it did not, revert the pull request and merge the revert. The pipeline deploys the old state.
+3. **The pipeline cannot log in** (a wrong change to `PlatformRoot`, or the role is gone). Use the second way in: the single sign-on administrator profile of each account.
+   ```
+   aws sso login --profile lab-<environment>
+   git checkout <last good commit>
+   npx cdk deploy Platform PlatformRoot -c environment=<environment> -c githubOwner=<owner> -c githubOwnerId=<owner id> --profile lab-<environment>
+   ```
+   Then run the workflow `login check` and the workflow `deploy` by hand to prove that the pipeline works again.
+4. **The OIDC provider is gone.** Deploy `Platform` from the laptop. This creates the provider again.
+5. **The single sign-on is gone too.** The management account has the role `OrganizationAccountAccessRole` in each member account. This is the last resort.
+
+Both stacks have termination protection, so a wrong `cdk destroy` fails before it removes anything.
+
 ## Run the checks locally
 
 You need Node.js 22.18 or later. Node.js runs the TypeScript files directly, so there is no build step.

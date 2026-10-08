@@ -1,0 +1,82 @@
+name: deploy
+
+# Deploys the Platform stack to test, then to staging, then to production. It runs after each merge to main.
+# Production waits for the required reviewer of the GitHub environment, like a release of a service.
+#
+# The jobs log in as the role github-platform-deploy. That role trusts this file on main and nothing else.
+# The role is in the stack PlatformRoot. This pipeline never deploys that stack: it cannot change the role that
+# it runs as. A person deploys PlatformRoot from a laptop. The README section "The pipeline of this repository" explains this.
+#
+# The dev account is not in this pipeline. A person deploys it from a laptop.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Two deployments of the same stack must not run at the same time. A running deployment is never cancelled.
+concurrency:
+  group: platform-deploy
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  deploy-test:
+    runs-on: ubuntu-latest
+    environment: test
+    timeout-minutes: 20
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/deploy-platform
+        with:
+          environment: test
+          account-id: ${{ secrets.AWS_ACCOUNT_ID }}
+          region: ${{ vars.AWS_REGION }}
+          owner: ${{ github.repository_owner }}
+          owner-id: ${{ github.repository_owner_id }}
+
+  deploy-staging:
+    needs: [deploy-test]
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 20
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/deploy-platform
+        with:
+          environment: staging
+          account-id: ${{ secrets.AWS_ACCOUNT_ID }}
+          region: ${{ vars.AWS_REGION }}
+          owner: ${{ github.repository_owner }}
+          owner-id: ${{ github.repository_owner_id }}
+
+  # The job waits for the required reviewer of the environment production. The wait does not count against the limit.
+  deploy-production:
+    needs: [deploy-staging]
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 20
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/deploy-platform
+        with:
+          environment: production
+          account-id: ${{ secrets.AWS_ACCOUNT_ID }}
+          region: ${{ vars.AWS_REGION }}
+          owner: ${{ github.repository_owner }}
+          owner-id: ${{ github.repository_owner_id }}
