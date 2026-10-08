@@ -511,6 +511,18 @@ The real import in `dev` passed with the policy as it is. Both resources went to
 The policy does **not** allow the first creation of the setting in an account that never had it. That needs two more actions, `application-signals:StartDiscovery` and `iam:CreateServiceLinkedRole`.
 The lab does not add them, because the policy is close to its size limit and the import needs neither. For a new dev account, use the temporary bootstrap with `AdministratorAccess` (section "Change the platform stack of dev"). The change touches no role and no provider.
 
+#### What the real runs showed
+
+| Run | Result |
+| --- | --- |
+| [Run 37857647908](https://github.com/jross24/lab-platform/actions/runs/37857647908), the first deploy with the step | `deploy-test` failed in the new step, before `cdk deploy`: `cdk import` reads the stack with its current credentials, and `github-platform-deploy` has no `cloudformation:DescribeStacks`. No account changed. The fix passes the credentials of the CDK deploy role to `cdk import`. |
+| [Run 37858064850](https://github.com/jross24/lab-platform/actions/runs/37858064850), after the fix | `deploy-test`, `deploy-staging` and `deploy-production` all `success`. Each job printed `Import step ...: import` for both resources, imported them (`importing using PolicyName=lab-xray-can-write-spans` and `AccountId`), and `cdk deploy` then changed only `CDKMetadata`. |
+| `aws cloudformation list-stack-resources` after run 37858064850 | The stack `Platform` of `test`, `staging` and `production` lists both resources as `IMPORT_COMPLETE`. The stack `lab-svc-core` of the three accounts lists neither. The destination is `CloudWatchLogs` and `ACTIVE`. |
+| One request to the web page of `test` and of `production`, after the import | One trace for each, with the segments of `web`, `catalogue`, `account` and `core` (test `1-6ac82471-14f30d5256ea6da424ff4ccd`, production `1-6ac8244f-ab8e5e6c15c9a7c910ea915d`). Tracing did not stop at any time. |
+| `node scripts/import-missing.ts --dry-run` with the read-only profiles, after the import | `nothing` in all three accounts. This is the decision of every later run. |
+| A throwaway stack in `dev`: an `IMPORT` change set for a policy name that does not exist | The change set is `FAILED` with `Resource of type 'AWS::Logs::ResourcePolicy' with identifier ... was not found.` The step reads exactly this answer as "nothing to import". |
+| `dev`, from the laptop, with the limited execution policy | The same script imported both resources (`IMPORT_COMPLETE`). A second run said `nothing`. `cdk diff Platform` showed no difference. No change to the policy. |
+
 ## Service control policies
 
 A service control policy (SCP) is a rule of AWS Organizations. It limits what the principals of a member account can do, also the administrator of that account.
