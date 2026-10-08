@@ -1,0 +1,4 @@
+{
+  "TransactionSearchXRayCanWriteSpans50F3D9CC": { "PolicyName": "lab-xray-can-write-spans" },
+  "TransactionSearchConfig7812D3D6": { "AccountId": "{{account-id}}" }
+}
