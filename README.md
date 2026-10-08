@@ -656,6 +656,46 @@ The `dev` account, with both policies attached:
 | On the GitHub provider of `dev`: a principal that is not the administrator calls `remove-client-id-from-open-id-connect-provider`, then `tag-open-id-connect-provider` | The first: explicit deny. The second works, and the test removed the tag again. |
 | `deploy` run 37853482607, run again after the guard was on `test`, `staging` and `production` | Attempt 2 passed: `deploy-test`, `deploy-staging` and `deploy-production` all `success`. Each job logged in as `github-platform-deploy`, deployed `Platform` through the CDK roles, and logged in again as `github-deploy`. ([run](https://github.com/jross24/lab-platform/actions/runs/37853482607)) |
 
+## The Lambda concurrency quota
+
+Each AWS account has a quota of concurrent Lambda executions for each region. The quota counts the invocations that run at the same moment, over all functions of the account.
+When the count reaches the quota, Lambda throttles the next invocation. The quota code is `L-B99A9384`. The lab uses the region `eu-west-2`.
+
+### The measurement
+
+All four accounts allowed **10** concurrent executions at the start. One request to the web page runs three functions at the same moment: web, catalogue and account.
+So about three visitors at the same time use the whole quota.
+
+On 2026-10-08, in Test, 24 simultaneous requests gave 13 times `503` (throttled), 7 times `502` and 4 times `200`. Eight simultaneous requests gave 8 times `502`.
+The web page returns `502` when both APIs fail, and here both were throttled. One request at a time worked. The issue is [lab-platform#51](https://github.com/jross24/lab-platform/issues/51).
+
+### The decision
+
+The owner asked AWS to raise the quota to **1000** in Test, Staging and Production. 1000 is the normal default of an AWS account, and the increase costs nothing.
+The requests were made on 2026-10-09, once in each account, with this command:
+
+```sh
+aws service-quotas request-service-quota-increase --service-code lambda --quota-code L-B99A9384 --desired-value 1000
+```
+
+**Dev stays at 10 on purpose.** The quota is one more limit on what an unreviewed preview can do: a preview cannot start more than 10 executions at once, whatever its code does.
+
+### Read the state
+
+```sh
+aws service-quotas list-requested-service-quota-change-history-by-quota --service-code lambda --quota-code L-B99A9384 --profile lab-test
+aws lambda get-account-settings --profile lab-test
+```
+
+Run both commands with each profile: `lab-test`, `lab-staging`, `lab-prod` and `lab-dev`. The first shows the request and its `Status`. The second shows the quota that AWS applies now (`AccountLimit.ConcurrentExecutions`).
+Only the second command proves that the quota rose. When it was written, on 2026-10-09, the three requests had the status `CASE_OPENED` (AWS had opened a support case) and all accounts still read 10.
+
+### What can go wrong
+
+- **AWS can take days.** The request goes to a support case, and a person at AWS reads it. Until it ends, the lab has the old quota.
+- **AWS can refuse.** A new account can get a refusal or a smaller value. If that happens, this section must say so, and the lab keeps 10.
+- **With 10, keep the load low.** More than three visitors at the same moment can get `502` or `503` from Test, Staging or Production. A load test of the lab is not possible then.
+
 ## Run the checks locally
 
 You need Node.js 22.18 or later. Node.js runs the TypeScript files directly, so there is no build step.

@@ -22,7 +22,7 @@ permissions: {}
 
 jobs:
   deploy-test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: test
     timeout-minutes: 20
     permissions:
@@ -42,7 +42,7 @@ jobs:
 
   deploy-staging:
     needs: [deploy-test]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: staging
     timeout-minutes: 20
     permissions:
@@ -63,7 +63,7 @@ jobs:
   # The job waits for the required reviewer of the environment production. The wait does not count against the limit.
   deploy-production:
     needs: [deploy-staging]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: production
     timeout-minutes: 20
     permissions:

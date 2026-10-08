@@ -15,7 +15,7 @@ jobs:
       fail-fast: false
       matrix:
         environment: [test, staging, production]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: ${{ matrix.environment }}
     steps:
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
@@ -26,7 +26,7 @@ jobs:
       - run: aws sts get-caller-identity --query Arn --output text
 
   denied:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - id: login
         continue-on-error: true
