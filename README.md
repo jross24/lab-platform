@@ -18,6 +18,8 @@ Each account gets the stack `Platform` (`lab-platform-<environment>`).
 The stacks have no fixed account. They deploy into the account of the AWS profile that you use.
 All stacks have termination protection, so a wrong `cdk destroy` fails.
 
+Two service control policies in `scp/` guard the accounts. They are not a stack. A person applies them from the management account: see "Service control policies".
+
 ## Why OIDC and no stored AWS key
 
 A stored AWS access key is a long-lived secret. If it leaks, an attacker can use it until someone rotates it.
@@ -300,7 +302,7 @@ SNS charges for requests and for deliveries, with a monthly free allowance. The 
 
 - A template can still create the allowed types, with any name that starts with `lab-`. It can fill the account with Lambda functions or DynamoDB tables, and it can delete a baseline stack through the CDK deploy role. The budget warns when the cost grows. It does not limit the cost.
 - A function of a preview can write the rollback floor parameter of core. It cannot write other parameters.
-- The policy does not limit the people with an administrator profile.
+- The execution policy does not limit the people with an administrator profile. The service control policy `lab-dev-guardrail` does limit them, in the region and in the expensive services. See "Service control policies".
 - The accounts `test`, `staging` and `production` still have the default execution role. Only `dev` runs unreviewed code.
 
 ## The `workflowRef` context value
@@ -358,6 +360,7 @@ The pipeline logs in with a role that this repository creates. A change to that 
 | The `dev` account (stack `Platform`) | A person, from a laptop | `cdk deploy Platform` with the profile `lab-dev` |
 | The guardrails of the `dev` account (stack `DevGuardrails`) | A person, from a laptop | `cdk deploy DevGuardrails` with the profile `lab-dev` |
 | The CDK bootstrap roles | A person, from a laptop | `cdk bootstrap` |
+| The service control policies (`scp/`) | A person, from a laptop | `node scripts/apply-scps.ts` with the profile of the management account |
 | The GitHub environments, the rulesets, the secrets | A person | The GitHub settings |
 
 So the pipeline may change almost everything about the platform, but not the role it logs in with. The code of that role is in `lib/root-stack.ts`, in a stack that `deploy.yml` never names.
@@ -366,9 +369,9 @@ A pull request that changes `lib/root-stack.ts` still shows a diff for `Platform
 What this separation does and does not give:
 
 - **It prevents accidents.** A change to the usual file of the platform cannot change the trust policy of the pipeline by mistake.
-- **It does not stop a malicious change.** The pipeline deploys through the CDK bootstrap roles. The CloudFormation execution role has `AdministratorAccess`. A pull request that a reviewer merges could attach a policy to the pipeline role from `Platform`.
-  The protection is the review of the pull request, the `cdk diff` comment, and the required reviewer on `production`. It is not a technical block.
-- **A technical block would be a service control policy.** It would deny every change to `role/github-platform-deploy` except for the administrator role of the SSO. The lab does not build it. A wrong policy at the level of the organisation could lock out the administrator.
+- **The convention alone does not stop a malicious change.** The pipeline deploys through the CDK bootstrap roles. The CloudFormation execution role has `AdministratorAccess`. A pull request that a reviewer merges could attach a policy to the pipeline role from `Platform`.
+  The first protection is the review of the pull request, the `cdk diff` comment, and the required reviewer on `production`.
+- **A service control policy makes it a technical block.** `lab-pipeline-role-guard` denies every change to `role/github-platform-deploy`, except for the administrator role of the SSO. See "Service control policies".
 
 ### Why the dev account is not in the pipeline
 
@@ -385,6 +388,7 @@ A person deploys it from a laptop. The comment of a pull request still shows the
    git checkout <last good commit>
    npx cdk deploy Platform PlatformRoot -c environment=<environment> -c githubOwner=<owner> -c githubOwnerId=<owner id> --profile lab-<environment>
    ```
+   The guard `lab-pipeline-role-guard` blocks a change to `github-platform-deploy`, also from `PlatformRoot`. If the repair needs that change, follow "Change the role of the pipeline" first.
    Then run the workflow `login check` and the workflow `deploy` by hand to prove that the pipeline works again.
 4. **The OIDC provider is gone.** Deploy `Platform` from the laptop. This creates the provider again.
 5. **The single sign-on is gone too.** The management account has the role `OrganizationAccountAccessRole` in each member account. This is the last resort.
@@ -411,6 +415,139 @@ The `dev` account was not part of these runs. A person deployed it from the lapt
 
 The ruleset of `main` requires `check`, `dependencies`, `secrets`, `actionlint` and, for `test`, `staging` and `production`, the four jobs of the diff (`gate`, `fetch`, `compute`, `report`).
 The diff jobs are all required, and not only `report`. If `fetch` fails, `compute` and `report` are skipped, and GitHub counts a skipped required check as passed.
+
+## Service control policies
+
+A service control policy (SCP) is a rule of AWS Organizations. It limits what the principals of a member account can do, also the administrator of that account.
+An SCP gives no permission. It only removes permission, and an explicit deny in it wins over every allow in the account.
+An SCP does not apply to the management account. So the owner can always detach a wrong policy there.
+
+The folder `scp/` holds two policies:
+
+| Policy | Attached to | What it does |
+| --- | --- | --- |
+| `lab-dev-guardrail` | `dev` | Denies every region except `eu-west-2`. Denies the services that cost much and that the lab does not use. |
+| `lab-pipeline-role-guard` | `dev`, `test`, `staging`, `production` | Denies every change to the role `github-platform-deploy`, and the removal of the GitHub OIDC provider, for everyone except the SSO administrator. |
+
+### Why a person applies them from a laptop
+
+The policies live in the management account of the organisation. The pipeline has no access to that account: its role can assume the two CDK roles of its own account and nothing else.
+So no merge to this repository can detach the guard. If the guard were a stack of `Platform`, the pipeline could remove its own guard.
+That is why `scripts/apply-scps.ts` runs by hand, with the profile `lab-admin` of the management account.
+
+### `lab-dev-guardrail`
+
+- **One region.** The statement `DenyOtherRegions` denies every action when `aws:RequestedRegion` is not `eu-west-2`. It uses `NotAction` with the list of the AWS documentation example, "Deny access to AWS based on the requested AWS Region".
+  The list exempts the services that have a global endpoint in `us-east-1`: IAM, STS, CloudFront, Route 53, Budgets, Cost Explorer, Support, Organizations, Health, the WAF family and a few more.
+  Without the list, a call to the global IAM endpoint would fail. The list also exempts some regional services, for example KMS and AWS Config. The rule does not limit those.
+- **No expensive service.** The statement `DenyExpensiveServices` denies the start of an EC2 instance (also Spot), a NAT gateway, an Elastic IP address, and all actions of RDS, Redshift, SageMaker, EKS, ElastiCache, MemoryDB, OpenSearch, MSK, EMR, DAX, WorkSpaces and Lightsail.
+- **It fits the lab.** The Dev stages use API Gateway, AppConfig, CloudFormation, CloudWatch, CodeDeploy, DynamoDB, IAM, Lambda, Logs, S3, SSM, STS, X-Ray, Budgets and SNS. None of them is on the deny list, and all run in `eu-west-2`. A unit test checks this.
+- **It also limits the SSO administrator of `dev`.** The policy has no bypass role on purpose. To use another region, detach the policy.
+
+### `lab-pipeline-role-guard`
+
+The section "The hard part: the pipeline changes the role that it runs as" says who changes what. The policy makes that table a technical rule.
+
+| Statement | Denies | Except |
+| --- | --- | --- |
+| `ProtectPipelineRole` | Every IAM write on `role/github-platform-deploy`: `Attach*`, `Delete*`, `Detach*`, `Put*`, `Tag*`, `Untag*` and `Update*`. This includes `UpdateAssumeRolePolicy`. | The SSO administrator |
+| `KeepGitHubOidcProvider` | `DeleteOpenIDConnectProvider` and `RemoveClientIDFromOpenIDConnectProvider` on the GitHub provider | The SSO administrator |
+
+The SSO administrator is the principal that matches `arn:aws:iam::*:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_AdministratorAccess_*` or `arn:aws:iam::*:role/aws-reserved/sso.amazonaws.com/*/AWSReservedSSO_AdministratorAccess_*`.
+The second form is the one that the lab uses: the path holds the region of IAM Identity Center. The first form covers a home region of `us-east-1`, which has no region in the path.
+IAM reserves the path `aws-reserved/sso.amazonaws.com/` for AWS: `create-role` with that path fails, also for an administrator. So no one can build a role that matches the pattern.
+
+**What the pipeline still does.** It deploys `Platform` through the CDK roles. CloudFormation then works as the execution role of the bootstrap.
+`Platform` holds the OIDC provider, and the pipeline changes it: run 37763755947 tagged it. CloudTrail shows that call: the principal was `cdk-hnb659fds-cfn-exec-role-<account>-eu-west-2`, session `AWSCloudFormation`.
+So the policy does not deny tags, new audiences or a new thumbprint on the provider. It denies only the two actions that remove the provider or its audience `sts.amazonaws.com`.
+`DeletionPolicy: Retain` already stops the removal in CloudFormation. The policy stops both actions for every principal except the administrator.
+
+**What the pipeline cannot do.** It cannot change `github-platform-deploy`. The execution role is not on the exception list.
+
+**Why the execution role is not on the exception list.** A deployment of `PlatformRoot` from the laptop runs as the same execution role as a deployment of the pipeline. The IAM call carries no sign of who started the stack.
+An exception for that role would open the same door for the pipeline. So the policy has no such exception. A change of `PlatformRoot` takes one extra step: see "Change the role of the pipeline".
+
+**What it does not stop.** The guard protects one role and one provider. A merged change could still create another administrator role in `Platform`, and a new workflow could use it.
+The review of the pull request and the reviewer on `production` stay the first protection.
+
+### Apply
+
+You need Node.js 22.18 or later, the AWS CLI v2, and the file with the account IDs outside this repository (`~/repos/.lab-accounts.env`, or the path in `LAB_ACCOUNTS_ENV`).
+The script reads the IDs from that file and never prints one. It uses only the `organizations` API. If `aws` is not on the `PATH`, set `AWS_CLI` to the full path. `LAB_ADMIN_PROFILE` changes the profile.
+
+```
+aws sso login --profile lab-admin
+
+# One time: switch on the policy type in the organisation.
+aws organizations enable-policy-type --root-id <root id> --policy-type SERVICE_CONTROL_POLICY --profile lab-admin
+
+node scripts/apply-scps.ts status
+node scripts/apply-scps.ts apply lab-dev-guardrail dev --dry-run
+node scripts/apply-scps.ts apply lab-dev-guardrail dev
+node scripts/apply-scps.ts apply lab-pipeline-role-guard dev
+```
+
+Test in `dev` first. Then attach the role guard to `test`, `staging` and `production`, one at a time, and look at the `deploy` workflow after the last one.
+Run the same command again at any time: the script is idempotent. It creates the policy if it is missing, updates it if the file changed, and attaches it if it is not attached.
+To change a policy, edit the JSON file, run `npm test`, run the script for `dev`, and test there before the other accounts.
+
+The script refuses three kinds of input:
+
+- A target that is not `dev`, `test`, `staging` or `production`. It never accepts a raw account ID, a root, an organisational unit or the management account. The organisation has other accounts that are not part of the lab.
+- A policy name that is not in the list of the script. The names start with `lab-`. The script never touches `FullAWSAccess`.
+- A profile that is not in the management account named in the env file.
+
+### Remove
+
+```
+node scripts/apply-scps.ts remove lab-pipeline-role-guard test
+node scripts/apply-scps.ts remove lab-dev-guardrail dev --delete
+```
+
+`remove` detaches the policy. `--delete` also deletes the policy when no account uses it any more.
+At the teardown of the lab (lab-platform#8), remove both policies from every account and delete them.
+Without the script, use `aws organizations list-policies-for-target`, `detach-policy` and `delete-policy` with the profile of the management account.
+
+### Change the role of the pipeline
+
+The guard blocks a change of `github-platform-deploy`, also from `cdk deploy PlatformRoot`. For a rare change, do this:
+
+1. Detach the guard from the one account: `node scripts/apply-scps.ts remove lab-pipeline-role-guard <target>`.
+2. Deploy: `npx cdk deploy PlatformRoot -c environment=<environment> -c githubOwner=<owner> -c githubOwnerId=<owner id> --profile lab-<environment>`.
+3. Attach the guard again: `node scripts/apply-scps.ts apply lab-pipeline-role-guard <target>`.
+
+For an urgent repair, the SSO administrator can also call IAM on the role directly, for example `aws iam update-assume-role-policy`. The guard allows that call. The stack then shows drift until someone deploys `PlatformRoot`.
+
+A change that the guard blocks can leave a stack in `ROLLBACK_FAILED` or `UPDATE_ROLLBACK_FAILED`, because the rollback is also a change of the role.
+Detach the guard, run `aws cloudformation continue-update-rollback` or delete the stack, and attach the guard again.
+
+### Lock-out warning
+
+- **The guard applies to the administrator of the account too**, except for the exceptions above. If the permission set `AdministratorAccess` is renamed or deleted in IAM Identity Center, the exception no longer matches, and no one in the account can change the role.
+  Detach the policy first. The management account can always do that.
+- **Never attach a policy to the root, to an organisational unit or to the management account.** A policy at the root would reach the other accounts of the organisation. The script does not allow it.
+- **A missing global service breaks a call.** If a call fails with `explicit deny in a service control policy` in `us-east-1`, add the service to the `NotAction` list of `lab-dev-guardrail`.
+- **The limit of an SCP is 5,120 characters.** The unit tests check it. The two policies use about 2,300 and 900.
+- **A policy takes effect in a few seconds.** Wait before you test.
+
+### What the real runs showed
+
+The `dev` account, with both policies attached:
+
+| What | Result |
+| --- | --- |
+| `aws lambda list-functions --region us-west-2` | `AccessDeniedException ... explicit deny in a service control policy` |
+| The same call with `--region eu-west-2` | Works |
+| `aws iam list-roles`, `aws sts get-caller-identity` and `aws budgets describe-budgets`, with `--region us-east-1` | Work: the global services are exempt |
+| `aws rds describe-db-instances`, `aws sagemaker list-endpoints` | Explicit deny |
+| `aws ec2 run-instances --dry-run` and `aws ec2 create-nat-gateway --dry-run` with real IDs | `UnauthorizedOperation`, explicit deny. A dry run starts nothing. |
+| `cdk deploy` of a copy of the catalogue service with a namespace, then `cdk destroy` | Both worked: Lambda, API Gateway, CodeDeploy, CloudWatch and SSM pass the guardrail. |
+| A throwaway role `github-platform-deploy`: a principal that is not the SSO administrator (it had `AdministratorAccess`) calls `tag-role`, `update-assume-role-policy`, `put-role-policy`, `attach-role-policy` and `delete-role` | All five: explicit deny in `lab-pipeline-role-guard`. `get-role` on it, and `tag-role` on another role, work. |
+| The same role, called by the SSO administrator | `tag-role`, `put-role-policy`, `delete-role-policy`, `untag-role` and `delete-role` work. The pattern matches the real path `aws-reserved/sso.amazonaws.com/eu-west-2/`. |
+| A CloudFormation stack with a service role (a stand-in for the execution role) that puts a policy on `github-platform-deploy` | `CREATE_FAILED`: `not authorized to perform: iam:PutRolePolicy ... explicit deny in a service control policy`, then `ROLLBACK_FAILED`. This is the path of the pipeline. |
+| The same stack, with the guard detached | `CREATE_COMPLETE`. This is the path of "Change the role of the pipeline". |
+| On the GitHub provider of `dev`: a principal that is not the administrator calls `remove-client-id-from-open-id-connect-provider`, then `tag-open-id-connect-provider` | The first: explicit deny. The second works, and the test removed the tag again. |
+| `deploy` run 37853482607, run again after the guard was on `test`, `staging` and `production` | Attempt 2 passed: `deploy-test`, `deploy-staging` and `deploy-production` all `success`. Each job logged in as `github-platform-deploy`, deployed `Platform` through the CDK roles, and logged in again as `github-deploy`. ([run](https://github.com/jross24/lab-platform/actions/runs/37853482607)) |
 
 ## Run the checks locally
 
