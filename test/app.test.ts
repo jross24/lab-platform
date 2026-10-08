@@ -12,8 +12,22 @@ describe('createApp', { timeout: 30_000 }, () => {
     expect(stackNames(environment)).toEqual([`lab-platform-${environment}`, `lab-platform-root-${environment}`].sort());
   });
 
-  it('makes only the platform stack for dev', () => {
-    expect(stackNames('dev')).toEqual(['lab-platform-dev']);
+  it('makes the platform stack and the guardrails stack for dev, and no root stack', () => {
+    expect(stackNames('dev')).toEqual(['lab-platform-dev', 'lab-platform-dev-guardrails']);
+  });
+
+  it('deploys the guardrails stack with the credentials of the person, so the policy that it makes cannot block it', () => {
+    const assembly = createApp({ environment: 'dev', githubOwner: 'jross24', githubOwnerId: '1001' }).synth();
+    const guardrails = assembly.getStackByName('lab-platform-dev-guardrails');
+    expect(guardrails.cloudFormationExecutionRoleArn).toBeUndefined();
+    expect(guardrails.assumeRoleArn).toBeUndefined();
+  });
+
+  it.each(['test', 'staging', 'production'])('deploys the stacks of %s through the bootstrap roles', (environment) => {
+    const assembly = createApp({ environment, githubOwner: 'jross24', githubOwnerId: '1001' }).synth();
+    for (const stack of assembly.stacks) {
+      expect(stack.cloudFormationExecutionRoleArn, stack.stackName).toMatch(/cfn-exec-role/);
+    }
   });
 
   it('makes the root stack depend on the platform stack, so the OIDC provider exists first', () => {
