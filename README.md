@@ -487,6 +487,11 @@ Do it before the pipeline deploys the resources. A plain deploy of the stack fai
 
 The accounts `test`, `staging` and `production` then deploy with `(no changes)` from the pipeline. The `dev` account is deployed by hand: run `cdk deploy Platform` after the import.
 
+**The dev account.** CloudFormation runs the import with the execution role of the bootstrap, and the policy `lab-dev-cfn-execution` limits that role (see "The guardrails of the dev account").
+The IAM policy simulator shows that the policy allows what the import, an update and a delete of the two resources need: `xray:GetTraceSegmentDestination`, `xray:GetIndexingRules`, `xray:UpdateIndexingRule`, `xray:UpdateTraceSegmentDestination`, and the Logs actions on resource policies and on the log group `aws/spans`.
+The policy does **not** allow the first creation of the setting in an account that never had it. That needs two more actions, `application-signals:StartDiscovery` and `iam:CreateServiceLinkedRole`.
+The lab does not add them, because the policy is close to its size limit and the import needs neither. For a new dev account, use the temporary bootstrap with `AdministratorAccess` (section "Change the platform stack of dev"). The change touches no role and no provider.
+
 ## Run the checks locally
 
 You need Node.js 22.18 or later. Node.js runs the TypeScript files directly, so there is no build step.
