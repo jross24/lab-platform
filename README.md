@@ -12,6 +12,7 @@ Each account gets the stack `Platform` (`lab-platform-<environment>`).
 | `Platform` | `test`, `staging`, `production` | The role `github-deploy`. A release workflow assumes it to deploy. |
 | `Platform` | `test` | The DynamoDB table `lab-test-lock`. Releases use it as a lock, so only one release uses the shared Test environment at a time. |
 | `Platform` | `dev` | The roles `github-preview` and `github-preview-sweeper`. They run the temporary environment of a pull request. |
+| `Platform` | all four | CloudWatch Transaction Search: the log group policy `lab-xray-can-write-spans` and `AWS::XRay::TransactionSearchConfig`. Without them the services cannot send traces. See the section "Transaction Search". |
 | `PlatformRoot` | `test`, `staging`, `production` | The role `github-platform-deploy`. The pipeline of this repository logs in with it. |
 
 The stacks have no fixed account. They deploy into the account of the AWS profile that you use.
@@ -213,6 +214,72 @@ The `dev` account was not part of these runs. A person deployed it from the lapt
 
 The ruleset of `main` requires `check`, `dependencies`, `secrets`, `actionlint` and, for `test`, `staging` and `production`, the four jobs of the diff (`gate`, `fetch`, `compute`, `report`).
 The diff jobs are all required, and not only `report`. If `fetch` fails, `compute` and `report` are skipped, and GitHub counts a skipped required check as passed.
+
+## Transaction Search: the tracing setting of the account
+
+The services send their spans to the OTLP endpoint of X-Ray. The endpoint accepts spans only when CloudWatch Transaction Search is on in the account.
+The setting belongs to the whole account and the whole region, not to one service. All four services use it, so the stack `Platform` owns it, in all four accounts ([#27](https://github.com/jross24/lab-platform/issues/27)).
+Core owned it before the move. The README of [lab-svc-core](https://github.com/jross24/lab-svc-core) now points here.
+
+`lib/transaction-search.ts` makes two resources:
+
+| Resource | What it does |
+| --- | --- |
+| CloudWatch Logs resource policy `lab-xray-can-write-spans` | Lets X-Ray write into the log group `aws/spans` of this account and region. It checks the source account and the source ARN, so another account cannot make X-Ray write here. |
+| `AWS::XRay::TransactionSearchConfig` | Turns Transaction Search on. X-Ray then writes each span as a log event into `aws/spans`, and it indexes 100 percent of the spans as traces that `aws xray batch-get-traces` finds. |
+
+The configuration depends on the policy, so the policy comes first. Both resources have `DeletionPolicy: Retain` and `UpdateReplacePolicy: Retain`.
+
+### What the setting does, and what it costs
+
+- **The indexing is 100 percent. This is a lab value.** AWS indexes 1 percent of the spans for free and charges for the rest. The lab has little traffic, so the cost is small. **A real team lowers the value.**
+- **The sampling is not set in this stack, and it stays as it is.** Each service decides which requests make a trace. Today every request of the lab makes one. **A real team lowers the sampling too.**
+  The two settings work in series: the sampling decides how many spans exist, and the indexing decides how many of them become traces that the X-Ray API can find.
+- **The first creation takes about 6 minutes.** The resource waits until the setting is active. The rehearsal measured 6 min 5 s. A job of the pipeline has a limit of 20 minutes, which is enough.
+- **A delete switches tracing off for all four services.** The destination goes to `XRay` after about 20 seconds, and the delete itself takes about 6 minutes.
+  The exports of the services then fail with a `WARN` log line. The requests still work. So both resources have the retain policies:
+  a change that removes them from the template leaves them in the account. The stack also has termination protection.
+  To switch tracing off on purpose, run `aws xray update-trace-segment-destination --destination XRay` by hand.
+- **The log group `aws/spans` is not a resource of the stack.** AWS creates it by itself. The stack cannot set its retention (the default is 30 days), and it cannot delete it.
+
+### Why a second stack cannot take the setting by a plain deploy
+
+Both resources have a fixed identity in the account: the name of the policy, and the account ID for the configuration.
+Core owned them until the move. The lab tried the ways to move them in the `lab-dev` account, with its own test stacks:
+
+| Way | Result |
+| --- | --- |
+| A stack removes a resource with `Retain` set in the same update | CloudFormation uses the policy of the **old** template, so the resource is deleted. `Retain` must be deployed one release before the removal. |
+| A new stack creates the policy while a policy with that name exists | The change set fails: `AWS::EarlyValidation::ResourceExistenceCheck`. |
+| A new stack creates the configuration while the setting is on | `CREATE_FAILED` with `HandlerErrorCode: AlreadyExists`. The rollback does not delete the setting when the resource has `Retain`. |
+| A stack imports the setting while another stack still owns it | Refused: `already exists in stack ...`. |
+| `--import-existing-resources` on the change set | It imports the policy, because the policy has a custom name. It does not import the configuration, because that has no name. |
+| The old stack deletes both, then the new stack creates both | Works, but tracing is off for about 13 minutes in each account (6 min 7 s delete, 6 min 38 s create). |
+| The old stack removes both with `Retain`, then the new stack imports both | Works. The import took 32 seconds, and the destination stayed `CloudWatchLogs` and `ACTIVE`. **No gap.** |
+
+The last way is the one the lab uses. Core took two releases: the first set `Retain`, and the second removed the two resources. Then a person imports them into this stack.
+The pipeline of this repository cannot do that step, because it runs `cdk deploy` and never makes a change set of type `IMPORT`.
+
+### Take over a setting that exists already
+
+Use this when an account has the setting but no stack owns it. This is the case after the second core release, and in a new account where someone set it up by hand.
+Do it before the pipeline deploys the resources. A plain deploy of the stack fails with `AlreadyExists` and rolls back. That is safe, and it also shows that the import is missing.
+
+1. Check out the commit that has `lib/transaction-search.ts` and run `npm ci`.
+2. Make sure that the stack `Platform` of the account is up to date. `cdk diff Platform` must show only the two new resources, because an import cannot change other resources.
+3. Run the import with an administrator profile. The logical IDs are the same in every account. Use the account ID of the profile.
+
+   ```
+   npx cdk import Platform -c environment=<environment> -c githubOwner=<owner> -c githubOwnerId=<owner id> \
+     --resource-mapping-inline '{"TransactionSearchXRayCanWriteSpans50F3D9CC":{"PolicyName":"lab-xray-can-write-spans"},"TransactionSearchConfig7812D3D6":{"AccountId":"<account id>"}}' \
+     --profile lab-<environment>
+   ```
+
+   The command shows the resources, asks for confirmation, and makes a change set of type `IMPORT`. The stack gets the resources without any change to them.
+4. Run `cdk diff Platform` again. It must show no difference. Then check that the setting is still on:
+   `aws xray get-trace-segment-destination --profile lab-<environment>` must show `"Destination": "CloudWatchLogs"` and `"Status": "ACTIVE"`.
+
+The accounts `test`, `staging` and `production` then deploy with `(no changes)` from the pipeline. The `dev` account is deployed by hand: run `cdk deploy Platform` after the import.
 
 ## Run the checks locally
 
