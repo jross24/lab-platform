@@ -59,15 +59,15 @@ function main(): void {
   const assumed = JSON.parse(
     awsJson(['sts', 'assume-role', '--role-arn', roleArn, '--role-session-name', 'platform-import-check']),
   ) as { Credentials: { AccessKeyId: string; SecretAccessKey: string; SessionToken: string } };
-  const readEnv: NodeJS.ProcessEnv = {
+  const deployRoleEnv: NodeJS.ProcessEnv = {
     ...process.env,
     AWS_ACCESS_KEY_ID: assumed.Credentials.AccessKeyId,
     AWS_SECRET_ACCESS_KEY: assumed.Credentials.SecretAccessKey,
     AWS_SESSION_TOKEN: assumed.Credentials.SessionToken,
   };
-  delete readEnv.AWS_PROFILE;
+  delete deployRoleEnv.AWS_PROFILE;
 
-  const listing = aws(['cloudformation', 'list-stack-resources', '--stack-name', stackName], readEnv);
+  const listing = aws(['cloudformation', 'list-stack-resources', '--stack-name', stackName], deployRoleEnv);
   let stackExists = true;
   let listed: string[] = [];
   if (listing.status === 0) {
@@ -92,6 +92,9 @@ function main(): void {
   const mappingPath = join(dir, 'mapping.json');
   writeFileSync(mappingPath, JSON.stringify(restrictMapping(mapping, decision.toImport)));
 
+  // CDK runs with the credentials of the deploy role. `cdk import` reads the stack with the current credentials, and the
+  // role of the pipeline has no CloudFormation read access (the first run failed with AccessDenied on DescribeStacks).
+  // The deploy role has that access, and it can create and run a change set. It is the role that `cdk deploy` uses.
   // No --force: CDK then refuses an import when the stack has other changes.
   // The output goes to the log and is also kept, to tell "the resource does not exist" from a real failure.
   const result = spawnSync(
@@ -103,7 +106,7 @@ function main(): void {
       '-c', `githubOwnerId=${ownerId}`,
       '--resource-mapping', mappingPath,
     ],
-    { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, env: process.env, shell: process.platform === 'win32' },
+    { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, env: deployRoleEnv, shell: process.platform === 'win32' },
   );
   process.stdout.write(result.stdout);
   process.stderr.write(result.stderr);
@@ -117,7 +120,7 @@ ${result.stderr}`) === 'not-found') {
     return;
   }
   throw new Error(
-    `cdk import failed for ${stackName}. Read the log above. A likely cause is that the stack has other changes: an import cannot change other resources.`,
+    `cdk import failed for ${stackName}. The log above shows the cause. Known causes: a missing permission, or other changes in the stack (an import cannot change other resources).`,
   );
 }
 
