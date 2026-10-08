@@ -21,6 +21,13 @@ export function decide(state: { stackExists: boolean; missing: readonly string[]
   return { action: 'import', toImport: [...state.missing] };
 }
 
+// Why did `cdk import` fail? CloudFormation checks the account when it makes the IMPORT change set. It answers
+// "Resource of type '...' with identifier '...' was not found" when the real resource does not exist. Then nothing
+// can be imported, and the normal deployment creates the resource. Any other failure stops the job.
+export function importFailureKind(output: string): 'not-found' | 'other' {
+  return /Resource of type '[^']+' with identifier .* was not found/.test(output) ? 'not-found' : 'other';
+}
+
 // The resources of the mapping that the stack does not list.
 export function missingResources(mappedIds: readonly string[], listedIds: readonly string[]): string[] {
   const listed = new Set(listedIds);

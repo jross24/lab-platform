@@ -21,7 +21,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BOOTSTRAP_QUALIFIER } from '../lib/github.ts';
-import { decide, fillMapping, listedLogicalIds, missingResources, restrictMapping } from './import-plan.ts';
+import { decide, fillMapping, importFailureKind, listedLogicalIds, missingResources, restrictMapping } from './import-plan.ts';
 
 const MAPPING_FILE = new URL('../import/transaction-search.json', import.meta.url);
 
@@ -93,6 +93,7 @@ function main(): void {
   writeFileSync(mappingPath, JSON.stringify(restrictMapping(mapping, decision.toImport)));
 
   // No --force: CDK then refuses an import when the stack has other changes.
+  // The output goes to the log and is also kept, to tell "the resource does not exist" from a real failure.
   const result = spawnSync(
     'npx',
     [
@@ -102,13 +103,22 @@ function main(): void {
       '-c', `githubOwnerId=${ownerId}`,
       '--resource-mapping', mappingPath,
     ],
-    { stdio: 'inherit', env: process.env, shell: process.platform === 'win32' },
+    { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, env: process.env, shell: process.platform === 'win32' },
   );
-  if (result.status !== 0) {
-    throw new Error(
-      `cdk import failed for ${stackName}. Two causes are likely: a resource does not exist in the account, or the stack has other changes.`,
+  process.stdout.write(result.stdout);
+  process.stderr.write(result.stderr);
+  if (result.status === 0) return;
+
+  if (importFailureKind(`${result.stdout}
+${result.stderr}`) === 'not-found') {
+    console.log(
+      `::notice::CloudFormation did not find the resources in the account, so there is nothing to import. The deployment creates them.`,
     );
+    return;
   }
+  throw new Error(
+    `cdk import failed for ${stackName}. Read the log above. A likely cause is that the stack has other changes: an import cannot change other resources.`,
+  );
 }
 
 try {

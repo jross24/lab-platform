@@ -336,14 +336,15 @@ Each job runs in the GitHub environment of its account. The environment `product
 merge to main -> deploy-test -> deploy-staging -> deploy-production (waits for the reviewer)
 ```
 
-Each job does four things:
+Each job does five things:
 
 1. It logs in as `github-platform-deploy` (OIDC). That role can assume the CDK deploy role and the CDK file publishing role of its own account, and nothing else.
-2. It runs `cdk deploy Platform`.
-3. It logs in again as `github-deploy`, the role of the release workflows, from a job in the same GitHub environment.
-4. It checks that the login gave `github-deploy`.
+2. It runs `scripts/import-missing.ts`. The step imports the Transaction Search resources when they exist in the account and the stack lacks them. Most runs it does nothing. See "Take over a setting that exists already".
+3. It runs `cdk deploy Platform`.
+4. It logs in again as `github-deploy`, the role of the release workflows, from a job in the same GitHub environment.
+5. It checks that the login gave `github-deploy`.
 
-Step 3 is the safety net. A change of this stack can break the login of every service release: a wrong trust policy, a lost OIDC provider.
+Step 4 is the safety net. A change of this stack can break the login of every service release: a wrong trust policy, a lost OIDC provider.
 If step 3 fails in `test`, `staging` and `production` never start. A bad change stops in the account that has the least value.
 
 A pull request shows the effect first. The workflow `ci` posts one `cdk diff` comment for each account (`test`, `staging`, `production` and `dev`), from the shared workflow of [lab-workflows](https://github.com/jross24/lab-workflows).
@@ -459,40 +460,53 @@ Core owned them until the move. The lab tried the ways to move them in the `lab-
 | The old stack deletes both, then the new stack creates both | Works, but tracing is off for about 13 minutes in each account (6 min 7 s delete, 6 min 38 s create). |
 | The old stack removes both with `Retain`, then the new stack imports both | Works. The import took 32 seconds, and the destination stayed `CloudWatchLogs` and `ACTIVE`. **No gap.** |
 
-The last way is the one the lab uses. Core took two releases: the first set `Retain`, and the second removed the two resources. Then a person imports them into this stack.
-The pipeline of this repository cannot do that step, because it runs `cdk deploy` and never makes a change set of type `IMPORT`.
+The last way is the one the lab uses. Core took two releases: the first set `Retain`, and the second removed the two resources. Then the pipeline of this repository imports them into this stack.
+The pipeline of this repository does the import itself, before it runs `cdk deploy`. The next section says how.
 
 ### Take over a setting that exists already
 
 Use this when an account has the setting but no stack owns it. This is the case after the second core release, and in a new account where someone set it up by hand.
-Do it before the pipeline deploys the resources. A plain deploy of the stack fails with `AlreadyExists` and rolls back. That is safe, and it also shows that the import is missing.
+A plain `cdk deploy` of the stack then fails with `AlreadyExists` and rolls back. That is safe, but it does not fix the problem. The stack must import the resources.
 
-1. Check out the commit that has `lib/transaction-search.ts` and run `npm ci`.
-2. Make sure that the stack `Platform` of the account is up to date. `cdk diff Platform` must show only the two new resources, because an import cannot change other resources.
-3. Write the file `mapping.json`. It maps the logical IDs to the real identifiers. The logical IDs are the same in every account. Use the account ID of the profile.
+**The pipeline does the import.** The deploy action runs `scripts/import-missing.ts` in `test`, `staging` and `production`, before `cdk deploy Platform` ([#55](https://github.com/jross24/lab-platform/issues/55)).
+The step needs no input and no person. It decides from the state of the stack, so a re-run and a new account work too:
 
-   ```
-   {
-     "TransactionSearchXRayCanWriteSpans50F3D9CC": { "PolicyName": "lab-xray-can-write-spans" },
-     "TransactionSearchConfig7812D3D6": { "AccountId": "<account id>" }
-   }
-   ```
+| State | Decision | What happens |
+| --- | --- | --- |
+| The stack does not exist yet | `create` | The step does nothing. `cdk deploy` creates the stack and both resources. |
+| The stack lists both resources | `nothing` | The step does nothing. This is the normal run. |
+| The stack exists and lacks one or both resources | `import` | The step runs `cdk import Platform --resource-mapping` for the missing ones. `cdk deploy` then shows `(no changes)`. |
 
-   Run the import with an administrator profile:
+How the step works:
 
-   ```
-   npx cdk import Platform -c environment=<environment> -c githubOwner=<owner> -c githubOwnerId=<owner id> \
-     --resource-mapping mapping.json --profile lab-<environment>
-   ```
+1. It assumes the CDK deploy role of the account (`cdk-hnb659fds-deploy-role-...`) and runs `aws cloudformation list-stack-resources`. The role of the pipeline can assume that role already, and it has CloudFormation read access. The pipeline gets **no new permission**.
+2. It reads `import/transaction-search.json`. The file maps the two logical IDs to the real identifiers: the policy name `lab-xray-can-write-spans`, and the account ID. The file is public, so it holds the text `{{account-id}}` and not the ID. The step puts in the ID of the account that it runs in.
+3. It runs `cdk import` without `--force`. CDK then refuses to import when the stack has other changes, because an import cannot change other resources. The job fails, and the stack stays as it was.
+4. CloudFormation makes a change set of type `IMPORT` and runs it with the execution role of the bootstrap. The resources are not changed. The destination stays `CloudWatchLogs` and `ACTIVE`.
 
-   The command shows the resources, asks for confirmation, and makes a change set of type `IMPORT`. Do not commit `mapping.json`: it holds an account ID. The stack gets the resources without any change to them.
-4. Run `cdk diff Platform` again. It must show no difference. Then check that the setting is still on:
-   `aws xray get-trace-segment-destination --profile lab-<environment>` must show `"Destination": "CloudWatchLogs"` and `"Status": "ACTIVE"`.
+**The step cannot ask the account if the resources exist.** The role of the pipeline cannot read CloudWatch Logs or X-Ray, and the pipeline must not widen its own role.
+CloudFormation checks it instead: it refuses an `IMPORT` change set with the text `Resource of type '...' with identifier '...' was not found`.
+The step treats exactly that answer as "nothing to import". It prints a notice, and `cdk deploy` creates the resources. Every other failure stops the job.
+If the guess is wrong, nothing breaks: `cdk deploy` fails with `AlreadyExists`, rolls back, and leaves the account as it was.
 
-The accounts `test`, `staging` and `production` then deploy with `(no changes)` from the pipeline. The `dev` account is deployed by hand: run `cdk deploy Platform` after the import.
+The step stays in the pipeline. A later environment can need it, and it does nothing when the stack lists both resources. Remove it when no account is left that could have the setting without a stack.
+
+Import by hand when you work outside the pipeline, for example in `dev`. The `dev` account is not in the pipeline. The script runs from a laptop too, and it uses the same mapping file:
+
+```
+aws sso login --profile lab-dev
+eval "$(aws configure export-credentials --profile lab-dev --format env)"
+export AWS_REGION=eu-west-2 ENVIRONMENT=dev OWNER=<owner> OWNER_ID=<owner id>
+node scripts/import-missing.ts --dry-run   # shows the decision only
+node scripts/import-missing.ts
+npx cdk deploy Platform -c environment=dev -c githubOwner=<owner> -c githubOwnerId=<owner id>
+```
+
+Run the `dev` commands **without** the boundary key in `~/.cdk.json`. With the key, `cdk diff` shows a new `PermissionsBoundary` on the roles of the stack. An import cannot change roles, and the execution policy denies the change.
+Check the result: `cdk diff Platform` must show no difference, and `aws xray get-trace-segment-destination` must show `"Destination": "CloudWatchLogs"` and `"Status": "ACTIVE"`.
 
 **The dev account.** CloudFormation runs the import with the execution role of the bootstrap, and the policy `lab-dev-cfn-execution` limits that role (see "The guardrails of the dev account").
-The IAM policy simulator shows that the policy allows what the import, an update and a delete of the two resources need: `xray:GetTraceSegmentDestination`, `xray:GetIndexingRules`, `xray:UpdateIndexingRule`, `xray:UpdateTraceSegmentDestination`, and the Logs actions on resource policies and on the log group `aws/spans`.
+The real import in `dev` passed with the policy as it is. Both resources went to `IMPORT_COMPLETE`, the second run of the step said `nothing`, and `cdk diff Platform` showed no difference. The policy needed no change.
 The policy does **not** allow the first creation of the setting in an account that never had it. That needs two more actions, `application-signals:StartDiscovery` and `iam:CreateServiceLinkedRole`.
 The lab does not add them, because the policy is close to its size limit and the import needs neither. For a new dev account, use the temporary bootstrap with `AdministratorAccess` (section "Change the platform stack of dev"). The change touches no role and no provider.
 

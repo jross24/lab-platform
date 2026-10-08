@@ -7,6 +7,7 @@ import {
   ACCOUNT_ID_PLACEHOLDER,
   decide,
   fillMapping,
+  importFailureKind,
   listedLogicalIds,
   missingResources,
   restrictMapping,
@@ -37,6 +38,20 @@ describe('decide', () => {
     const missing = ['A'];
     decide({ stackExists: true, missing });
     expect(missing).toEqual(['A']);
+  });
+});
+
+describe('importFailureKind', () => {
+  it('knows the answer of CloudFormation when a resource is not in the account', () => {
+    const output =
+      "Failed to create ChangeSet: FAILED, Resource of type 'AWS::Logs::ResourcePolicy' with identifier '{\"/properties/PolicyName\":\"lab-xray-can-write-spans\"}' was not found.";
+    expect(importFailureKind(output)).toBe('not-found');
+  });
+
+  it('treats every other failure as a real failure', () => {
+    expect(importFailureKind('AccessDenied: not authorized to perform cloudformation:CreateChangeSet')).toBe('other');
+    expect(importFailureKind('No resource updates or deletes are allowed on import')).toBe('other');
+    expect(importFailureKind('')).toBe('other');
   });
 });
 
