@@ -1,0 +1,44 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ProtectPipelineRole",
+      "Effect": "Deny",
+      "Action": [
+        "iam:Attach*",
+        "iam:Delete*",
+        "iam:Detach*",
+        "iam:Put*",
+        "iam:Tag*",
+        "iam:Untag*",
+        "iam:Update*"
+      ],
+      "Resource": "arn:aws:iam::*:role/github-platform-deploy",
+      "Condition": {
+        "ArnNotLike": {
+          "aws:PrincipalArn": [
+            "arn:aws:iam::*:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_AdministratorAccess_*",
+            "arn:aws:iam::*:role/aws-reserved/sso.amazonaws.com/*/AWSReservedSSO_AdministratorAccess_*"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "KeepGitHubOidcProvider",
+      "Effect": "Deny",
+      "Action": [
+        "iam:DeleteOpenIDConnectProvider",
+        "iam:RemoveClientIDFromOpenIDConnectProvider"
+      ],
+      "Resource": "arn:aws:iam::*:oidc-provider/token.actions.githubusercontent.com",
+      "Condition": {
+        "ArnNotLike": {
+          "aws:PrincipalArn": [
+            "arn:aws:iam::*:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_AdministratorAccess_*",
+            "arn:aws:iam::*:role/aws-reserved/sso.amazonaws.com/*/AWSReservedSSO_AdministratorAccess_*"
+          ]
+        }
+      }
+    }
+  ]
+}
