@@ -193,6 +193,27 @@ A person deploys it from a laptop. The comment of a pull request still shows the
 
 Both stacks have termination protection, so a wrong `cdk destroy` fails before it removes anything.
 
+### What the real runs showed
+
+| Run | What happened |
+| --- | --- |
+| [37762284445](https://github.com/jross24/lab-platform/actions/runs/37762284445), the merge of the pipeline itself | `deploy-test`, `deploy-staging` and `deploy-production` ran in this order. The production job waited for the reviewer. Each job logged in as `github-platform-deploy` and printed `(no changes)`. Then each job logged in as `github-deploy` from its GitHub environment, and the check passed. |
+| [37762933185](https://github.com/jross24/lab-platform/actions/runs/37762933185), a description for the stack | The run was green and changed nothing. **CloudFormation does not treat a change of the description alone as a change.** `cdk deploy` printed `(no changes)`, and `describe-stacks` still showed no description. |
+| [37763755947](https://github.com/jross24/lab-platform/actions/runs/37763755947), a tag on the stack and on every taggable resource | A real change went through all three accounts. The tag is on the stack and on the roles and the OIDC provider, and the description from the run before arrived with it. The `cdk diff` comment of the pull request had shown exactly these three in-place changes. |
+
+Two more facts from the first pull request of the pipeline:
+
+- The four `cdk diff` calls of one run used the same name for their artefacts, so each job read the templates of another account and showed every resource as new.
+  The shared workflow now puts the key of the call in the name.
+- `PlatformRoot` depends on `Platform`. `cdk diff --template` refuses to compare two stacks, so the shared workflow passes `--exclusively`.
+
+The `dev` account was not part of these runs. A person deployed it from the laptop after the merge, and the comment of the pull request had shown that it was behind.
+
+### Required checks
+
+The ruleset of `main` requires `check`, `dependencies`, `secrets`, `actionlint` and, for `test`, `staging` and `production`, the four jobs of the diff (`gate`, `fetch`, `compute`, `report`).
+The diff jobs are all required, and not only `report`. If `fetch` fails, `compute` and `report` are skipped, and GitHub counts a skipped required check as passed.
+
 ## Run the checks locally
 
 You need Node.js 22.18 or later. Node.js runs the TypeScript files directly, so there is no build step.
