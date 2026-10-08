@@ -114,6 +114,7 @@ CloudFormation works with the execution role of the CDK bootstrap: `cdk-hnb659fd
 By default this role has `AdministratorAccess`. So a template could create anything in `lab-dev`: an IAM user, a large instance, a role that reaches the CDK deploy role.
 
 The stack `DevGuardrails` (`lab-platform-dev-guardrails`) removes this power with two managed policies. The code is in `lib/dev-policies.ts`.
+The same stack holds a monthly budget that warns when the cost grows. See "The budget of the dev account".
 
 | Policy | Where it is attached | What it limits |
 | --- | --- | --- |
@@ -174,7 +175,7 @@ You need an administrator profile for the `dev` account. The order matters.
 ```
 aws sso login --profile lab-dev
 
-# 1. Create the two policies. The stack deploys with your own credentials, not through the execution role.
+# 1. Create the two policies and the budget. The stack deploys with your own credentials, not through the execution role.
 npx cdk deploy DevGuardrails -c environment=dev -c githubOwner=<owner> -c githubOwnerId=<owner id> --profile lab-dev
 
 # 2. Deploy the baseline stacks again with the boundary (see the next section), so their roles carry it.
@@ -242,7 +243,7 @@ The bootstrap names the policy by its ARN. So a change of the policy needs `cdk 
 3. Deploy with `npx cdk deploy DevGuardrails ...` and the administrator profile.
 
 To find the actions of a resource type, read the handler permissions: `aws cloudformation describe-type --type RESOURCE --type-name AWS::ApiGatewayV2::Stage --query Schema`. The lab added `apigateway:TagResource` this way, after a real failure.
-The AWS Budgets budget and the SNS topic of lab-platform#43 (option 3) need new statements here. They are not in the policy yet.
+The budget and its SNS topic need no statement here, because the stack that holds them deploys with your own credentials.
 
 ### What the real runs showed
 
@@ -261,9 +262,43 @@ The AWS Budgets budget and the SNS topic of lab-platform#43 (option 3) need new 
 | A tag added to the stack `Platform` of `dev`, deployed with `cdk deploy Platform` | `UPDATE_FAILED` on the OIDC provider: `not authorized to perform: iam:GetOpenIDConnectProvider ... explicit deny`. The stack went to `UPDATE_ROLLBACK_FAILED`, and `continue-update-rollback` with `--resources-to-skip` for the provider repaired it. No role or provider had changed. |
 | A role with the boundary and an inline policy `Action: *, Resource: *` | Created. The policy simulator shows `sts:AssumeRole`, `iam:CreateUser` and `cloudformation:DeleteStack` as `explicitDeny`, and `sqs:CreateQueue` and `ec2:RunInstances` as `implicitDeny`, all with `AllowedByPermissionsBoundary: false`. |
 
+### The budget of the dev account
+
+`DevGuardrails` also holds a budget and an SNS topic. The code is in `lib/dev-budget.ts`.
+
+| Part | Value |
+| --- | --- |
+| Budget `lab-dev-monthly` | Type cost, period month, limit 2 USD. It counts the usage and not the credits or refunds, so a credit does not hide the spend. |
+| Alert 1 | The actual cost of the month is above 80 percent of the limit (1.60 USD). |
+| Alert 2 | The forecast cost of the month is above 100 percent of the limit (2 USD). |
+| Topic `lab-dev-budget-alerts` | Both alerts go to this topic. Its policy lets `budgets.amazonaws.com` publish, and only for a budget of the same account. It refuses a request without TLS. |
+
+The topic has no subscriber. The code holds no email address, because this repository is public.
+Until the owner adds a subscriber, an alert goes to the topic and nobody reads it.
+
+**A budget warns. It does not stop spend.** The budget has no action. It never stops a service or removes a resource.
+AWS updates the billing data up to three times a day, so an alert can come hours after the cost crossed the line.
+AWS also needs some history of usage before it can forecast, so alert 2 can stay silent in a young account.
+
+Subscribe your address with one command. It reads the account ID from your session, so no account ID is in the command:
+
+```
+aws sns subscribe --profile lab-dev --region eu-west-2 --protocol email --notification-endpoint <address>   --topic-arn "arn:aws:sns:eu-west-2:$(aws sts get-caller-identity --profile lab-dev --query Account --output text):lab-dev-budget-alerts"
+```
+
+AWS sends a mail to the address. Open the link in it to confirm. The subscription is not part of the stack, so `cdk deploy` does not remove it.
+To stop the mails, run `aws sns unsubscribe --subscription-arn <arn> --profile lab-dev --region eu-west-2`. `aws sns list-subscriptions-by-topic` shows the ARN.
+
+Deploy the budget with the same command as the policies (step 1 of "Apply it"). The topic stays unencrypted on purpose.
+Budgets cannot publish to a topic that uses the AWS managed key of SNS, and the alert holds only a cost figure.
+
+**Cost.** AWS Budgets is free for a budget without actions. A budget with actions is free for the first two in an account, and then costs 0.10 USD a day for each further one.
+This budget has no action. The [pricing page](https://aws.amazon.com/aws-cost-management/aws-budgets/pricing/) says: "You can monitor and receive notifications on your budgets free of charge" (checked on 2026-10-08).
+SNS charges for requests and for deliveries, with a monthly free allowance. The budget sends at most two messages each month, and the topic has no subscriber, so nothing is delivered.
+
 ### What the guardrails do not stop
 
-- A template can still create the allowed types, with any name that starts with `lab-`. It can fill the account with Lambda functions or DynamoDB tables, and it can delete a baseline stack through the CDK deploy role. A budget (option 3) limits the cost.
+- A template can still create the allowed types, with any name that starts with `lab-`. It can fill the account with Lambda functions or DynamoDB tables, and it can delete a baseline stack through the CDK deploy role. The budget warns when the cost grows. It does not limit the cost.
 - A function of a preview can write the rollback floor parameter of core. It cannot write other parameters.
 - The policy does not limit the people with an administrator profile.
 - The accounts `test`, `staging` and `production` still have the default execution role. Only `dev` runs unreviewed code.
