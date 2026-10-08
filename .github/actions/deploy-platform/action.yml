@@ -39,6 +39,17 @@ runs:
         aws-region: ${{ inputs.region }}
         mask-aws-account-id: true
 
+    # Adopts the Transaction Search resources that exist in the account but that no stack owns (lab-platform#55).
+    # The step reads the stack. If the stack holds both resources it does nothing, so a re-run and a new account work.
+    # It uses the roles that the job has already: the role of the pipeline and the CDK deploy role. It adds no permission.
+    - name: import missing resources
+      shell: bash
+      env:
+        ENVIRONMENT: ${{ inputs.environment }}
+        OWNER: ${{ inputs.owner }}
+        OWNER_ID: ${{ inputs.owner-id }}
+      run: node scripts/import-missing.ts
+
     # Only the stack Platform. The stack PlatformRoot holds the role that this job runs as, and a person deploys it.
     - name: cdk deploy Platform
       shell: bash

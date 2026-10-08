@@ -12,6 +12,7 @@ Each account gets the stack `Platform` (`lab-platform-<environment>`).
 | `Platform` | `test`, `staging`, `production` | The role `github-deploy`. A release workflow assumes it to deploy. |
 | `Platform` | `test` | The DynamoDB table `lab-test-lock`. Releases use it as a lock, so only one release uses the shared Test environment at a time. |
 | `Platform` | `dev` | The roles `github-preview` and `github-preview-sweeper`. They run the temporary environment of a pull request. |
+| `Platform` | all four | CloudWatch Transaction Search: the log group policy `lab-xray-can-write-spans` and `AWS::XRay::TransactionSearchConfig`. Without them the services cannot send traces. See the section "Transaction Search". |
 | `PlatformRoot` | `test`, `staging`, `production` | The role `github-platform-deploy`. The pipeline of this repository logs in with it. |
 | `DevGuardrails` | `dev` | The permissions boundary `lab-dev-boundary` and the execution policy `lab-dev-cfn-execution`. They limit what a preview can create. |
 
@@ -335,14 +336,15 @@ Each job runs in the GitHub environment of its account. The environment `product
 merge to main -> deploy-test -> deploy-staging -> deploy-production (waits for the reviewer)
 ```
 
-Each job does four things:
+Each job does five things:
 
 1. It logs in as `github-platform-deploy` (OIDC). That role can assume the CDK deploy role and the CDK file publishing role of its own account, and nothing else.
-2. It runs `cdk deploy Platform`.
-3. It logs in again as `github-deploy`, the role of the release workflows, from a job in the same GitHub environment.
-4. It checks that the login gave `github-deploy`.
+2. It runs `scripts/import-missing.ts`. The step imports the Transaction Search resources when they exist in the account and the stack lacks them. Most runs it does nothing. See "Take over a setting that exists already".
+3. It runs `cdk deploy Platform`.
+4. It logs in again as `github-deploy`, the role of the release workflows, from a job in the same GitHub environment.
+5. It checks that the login gave `github-deploy`.
 
-Step 3 is the safety net. A change of this stack can break the login of every service release: a wrong trust policy, a lost OIDC provider.
+Step 4 is the safety net. A change of this stack can break the login of every service release: a wrong trust policy, a lost OIDC provider.
 If step 3 fails in `test`, `staging` and `production` never start. A bad change stops in the account that has the least value.
 
 A pull request shows the effect first. The workflow `ci` posts one `cdk diff` comment for each account (`test`, `staging`, `production` and `dev`), from the shared workflow of [lab-workflows](https://github.com/jross24/lab-workflows).
@@ -415,6 +417,98 @@ The `dev` account was not part of these runs. A person deployed it from the lapt
 
 The ruleset of `main` requires `check`, `dependencies`, `secrets`, `actionlint` and, for `test`, `staging` and `production`, the four jobs of the diff (`gate`, `fetch`, `compute`, `report`).
 The diff jobs are all required, and not only `report`. If `fetch` fails, `compute` and `report` are skipped, and GitHub counts a skipped required check as passed.
+
+## Transaction Search: the tracing setting of the account
+
+The services send their spans to the OTLP endpoint of X-Ray. The endpoint accepts spans only when CloudWatch Transaction Search is on in the account.
+The setting belongs to the whole account and the whole region, not to one service. All four services use it, so the stack `Platform` owns it, in all four accounts ([#27](https://github.com/jross24/lab-platform/issues/27)).
+Core owned it before the move. The README of [lab-svc-core](https://github.com/jross24/lab-svc-core) now points here.
+
+`lib/transaction-search.ts` makes two resources:
+
+| Resource | What it does |
+| --- | --- |
+| CloudWatch Logs resource policy `lab-xray-can-write-spans` | Lets X-Ray write into the log group `aws/spans` of this account and region. It checks the source account and the source ARN, so another account cannot make X-Ray write here. |
+| `AWS::XRay::TransactionSearchConfig` | Turns Transaction Search on. X-Ray then writes each span as a log event into `aws/spans`, and it indexes 100 percent of the spans as traces that `aws xray batch-get-traces` finds. |
+
+The configuration depends on the policy, so the policy comes first. Both resources have `DeletionPolicy: Retain` and `UpdateReplacePolicy: Retain`.
+
+### What the setting does, and what it costs
+
+- **The indexing is 100 percent. This is a lab value.** AWS indexes 1 percent of the spans for free and charges for the rest. The lab has little traffic, so the cost is small. **A real team lowers the value.**
+- **The sampling is not set in this stack, and it stays as it is.** Each service decides which requests make a trace. Today every request of the lab makes one. **A real team lowers the sampling too.**
+  The two settings work in series: the sampling decides how many spans exist, and the indexing decides how many of them become traces that the X-Ray API can find.
+- **The first creation takes about 6 minutes.** The resource waits until the setting is active. The rehearsal measured 6 min 5 s. A job of the pipeline has a limit of 20 minutes, which is enough.
+- **A delete switches tracing off for all four services.** The destination goes to `XRay` after about 20 seconds, and the delete itself takes about 6 minutes.
+  The exports of the services then fail with a `WARN` log line. The requests still work. So both resources have the retain policies:
+  a change that removes them from the template leaves them in the account. The stack also has termination protection.
+  To switch tracing off on purpose, run `aws xray update-trace-segment-destination --destination XRay` by hand.
+- **The log group `aws/spans` is not a resource of the stack.** AWS creates it by itself. The stack cannot set its retention (the default is 30 days), and it cannot delete it.
+
+### Why a second stack cannot take the setting by a plain deploy
+
+Both resources have a fixed identity in the account: the name of the policy, and the account ID for the configuration.
+Core owned them until the move. The lab tried the ways to move them in the `lab-dev` account, with its own test stacks:
+
+| Way | Result |
+| --- | --- |
+| A stack removes a resource with `Retain` set in the same update | CloudFormation uses the policy of the **old** template, so the resource is deleted. `Retain` must be deployed one release before the removal. |
+| A new stack creates the policy while a policy with that name exists | The change set fails: `AWS::EarlyValidation::ResourceExistenceCheck`. |
+| A new stack creates the configuration while the setting is on | `CREATE_FAILED` with `HandlerErrorCode: AlreadyExists`. The rollback does not delete the setting when the resource has `Retain`. |
+| A stack imports the setting while another stack still owns it | Refused: `already exists in stack ...`. |
+| `--import-existing-resources` on the change set | It imports the policy, because the policy has a custom name. It does not import the configuration, because that has no name. |
+| The old stack deletes both, then the new stack creates both | Works, but tracing is off for about 13 minutes in each account (6 min 7 s delete, 6 min 38 s create). |
+| The old stack removes both with `Retain`, then the new stack imports both | Works. The import took 32 seconds, and the destination stayed `CloudWatchLogs` and `ACTIVE`. **No gap.** |
+
+The last way is the one the lab uses. Core took two releases: the first set `Retain`, and the second removed the two resources. Then the pipeline of this repository imports them into this stack.
+The pipeline of this repository does the import itself, before it runs `cdk deploy`. The next section says how.
+
+### Take over a setting that exists already
+
+Use this when an account has the setting but no stack owns it. This is the case after the second core release, and in a new account where someone set it up by hand.
+A plain `cdk deploy` of the stack then fails with `AlreadyExists` and rolls back. That is safe, but it does not fix the problem. The stack must import the resources.
+
+**The pipeline does the import.** The deploy action runs `scripts/import-missing.ts` in `test`, `staging` and `production`, before `cdk deploy Platform` ([#55](https://github.com/jross24/lab-platform/issues/55)).
+The step needs no input and no person. It decides from the state of the stack, so a re-run and a new account work too:
+
+| State | Decision | What happens |
+| --- | --- | --- |
+| The stack does not exist yet | `create` | The step does nothing. `cdk deploy` creates the stack and both resources. |
+| The stack lists both resources | `nothing` | The step does nothing. This is the normal run. |
+| The stack exists and lacks one or both resources | `import` | The step runs `cdk import Platform --resource-mapping` for the missing ones. `cdk deploy` then shows `(no changes)`. |
+
+How the step works:
+
+1. It assumes the CDK deploy role of the account (`cdk-hnb659fds-deploy-role-...`) and runs `aws cloudformation list-stack-resources`. The role of the pipeline can assume that role already, and it has CloudFormation read access. The pipeline gets **no new permission**.
+2. It reads `import/transaction-search.json`. The file maps the two logical IDs to the real identifiers: the policy name `lab-xray-can-write-spans`, and the account ID. The file is public, so it holds the text `{{account-id}}` and not the ID. The step puts in the ID of the account that it runs in.
+3. It runs `cdk import` without `--force`. CDK then refuses to import when the stack has other changes, because an import cannot change other resources. The job fails, and the stack stays as it was.
+4. CloudFormation makes a change set of type `IMPORT` and runs it with the execution role of the bootstrap. The resources are not changed. The destination stays `CloudWatchLogs` and `ACTIVE`.
+
+**The step cannot ask the account if the resources exist.** The role of the pipeline cannot read CloudWatch Logs or X-Ray, and the pipeline must not widen its own role.
+CloudFormation checks it instead: it refuses an `IMPORT` change set with the text `Resource of type '...' with identifier '...' was not found`.
+The step treats exactly that answer as "nothing to import". It prints a notice, and `cdk deploy` creates the resources. Every other failure stops the job.
+If the guess is wrong, nothing breaks: `cdk deploy` fails with `AlreadyExists`, rolls back, and leaves the account as it was.
+
+The step stays in the pipeline. A later environment can need it, and it does nothing when the stack lists both resources. Remove it when no account is left that could have the setting without a stack.
+
+Import by hand when you work outside the pipeline, for example in `dev`. The `dev` account is not in the pipeline. The script runs from a laptop too, and it uses the same mapping file:
+
+```
+aws sso login --profile lab-dev
+eval "$(aws configure export-credentials --profile lab-dev --format env)"
+export AWS_REGION=eu-west-2 ENVIRONMENT=dev OWNER=<owner> OWNER_ID=<owner id>
+node scripts/import-missing.ts --dry-run   # shows the decision only
+node scripts/import-missing.ts
+npx cdk deploy Platform -c environment=dev -c githubOwner=<owner> -c githubOwnerId=<owner id>
+```
+
+Run the `dev` commands **without** the boundary key in `~/.cdk.json`. With the key, `cdk diff` shows a new `PermissionsBoundary` on the roles of the stack. An import cannot change roles, and the execution policy denies the change.
+Check the result: `cdk diff Platform` must show no difference, and `aws xray get-trace-segment-destination` must show `"Destination": "CloudWatchLogs"` and `"Status": "ACTIVE"`.
+
+**The dev account.** CloudFormation runs the import with the execution role of the bootstrap, and the policy `lab-dev-cfn-execution` limits that role (see "The guardrails of the dev account").
+The real import in `dev` passed with the policy as it is. Both resources went to `IMPORT_COMPLETE`, the second run of the step said `nothing`, and `cdk diff Platform` showed no difference. The policy needed no change.
+The policy does **not** allow the first creation of the setting in an account that never had it. That needs two more actions, `application-signals:StartDiscovery` and `iam:CreateServiceLinkedRole`.
+The lab does not add them, because the policy is close to its size limit and the import needs neither. For a new dev account, use the temporary bootstrap with `AdministratorAccess` (section "Change the platform stack of dev"). The change touches no role and no provider.
 
 ## Service control policies
 

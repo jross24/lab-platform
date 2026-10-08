@@ -13,6 +13,7 @@ import {
   pullRequestSub,
   workflowRefOf,
 } from './github.ts';
+import { TransactionSearch } from './transaction-search.ts';
 
 // The ARN of one CDK bootstrap role of the account that holds the stack.
 function bootstrapRoleArn(stack: Stack, kind: 'deploy-role' | 'file-publishing-role'): string {
@@ -53,6 +54,9 @@ export class PlatformStack extends Stack {
     }
 
     this.addPullRequestDiffRole(config, provider);
+
+    // The setting belongs to the whole account, so every account has it, the dev account too.
+    new TransactionSearch(this, 'TransactionSearch');
 
     if (environment === 'dev') {
       this.addPreviewRoles(config, provider);
