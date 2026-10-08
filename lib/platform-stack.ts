@@ -1,4 +1,4 @@
-import { ArnFormat, CfnOutput, Duration, RemovalPolicy, Stack, Tags } from 'aws-cdk-lib';
+import { ArnFormat, CfnOutput, CliCredentialsStackSynthesizer, Duration, RemovalPolicy, Stack, Tags } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import type { Construct } from 'constructs';
@@ -35,6 +35,9 @@ export class PlatformStack extends Stack {
       description:
         'Shared platform of the pipeline lab: the GitHub OIDC login and the roles of the pipelines. Deployed by the pipeline of lab-platform.',
       terminationProtection: true,
+      // In dev a person deploys this stack, with the credentials of the person. The execution policy of the dev account
+      // refuses to change the roles github-*, so CloudFormation must not run with it. The other accounts deploy through the bootstrap roles.
+      synthesizer: environment === 'dev' ? new CliCredentialsStackSynthesizer() : undefined,
     });
 
     // Every resource that takes a tag shows which repository manages it. A tag changes a resource in place.

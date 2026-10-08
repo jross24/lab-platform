@@ -13,9 +13,10 @@ Each account gets the stack `Platform` (`lab-platform-<environment>`).
 | `Platform` | `test` | The DynamoDB table `lab-test-lock`. Releases use it as a lock, so only one release uses the shared Test environment at a time. |
 | `Platform` | `dev` | The roles `github-preview` and `github-preview-sweeper`. They run the temporary environment of a pull request. |
 | `PlatformRoot` | `test`, `staging`, `production` | The role `github-platform-deploy`. The pipeline of this repository logs in with it. |
+| `DevGuardrails` | `dev` | The permissions boundary `lab-dev-boundary` and the execution policy `lab-dev-cfn-execution`. They limit what a preview can create. |
 
 The stacks have no fixed account. They deploy into the account of the AWS profile that you use.
-Both stacks have termination protection, so a wrong `cdk destroy` fails.
+All stacks have termination protection, so a wrong `cdk destroy` fails.
 
 ## Why OIDC and no stored AWS key
 
@@ -102,9 +103,153 @@ The `dev` account is the developer account. It has no release path and no `githu
 It holds the baseline copy of the four services and the temporary environments of pull requests.
 
 - `github-preview` is for the preview of a pull request. It can assume the CDK deploy role and the CDK file publishing role of the account, and nothing else.
-  Through them, a pull request can create any resource in `dev`. The CloudFormation execution role of the bootstrap has the managed policy `AdministratorAccess`.
-  The README of lab-workflows lists what stops a pull request from doing harm there, and what does not.
+  Through them, a pull request can create the resource types of the `Dev` stages in `dev`, and no others. The CloudFormation execution role of the bootstrap has the custom policy `lab-dev-cfn-execution`.
+  See "The guardrails of the dev account". The README of lab-workflows lists what stops a pull request from doing harm there, and what does not.
 - `github-preview-sweeper` removes old previews. A scheduled workflow on `main` of lab-workflows assumes it. It can assume the CDK deploy role only.
+
+## The guardrails of the dev account
+
+A preview runs the CDK code of a pull request. CloudFormation then creates what that code describes.
+CloudFormation works with the execution role of the CDK bootstrap: `cdk-hnb659fds-cfn-exec-role-<account id>-eu-west-2`.
+By default this role has `AdministratorAccess`. So a template could create anything in `lab-dev`: an IAM user, a large instance, a role that reaches the CDK deploy role.
+
+The stack `DevGuardrails` (`lab-platform-dev-guardrails`) removes this power with two managed policies. The code is in `lib/dev-policies.ts`.
+
+| Policy | Where it is attached | What it limits |
+| --- | --- | --- |
+| `lab-dev-cfn-execution` | The execution role, through `cdk bootstrap` | What CloudFormation can create. |
+| `lab-dev-boundary` | Every IAM role that a stack creates in `dev`, as the permissions boundary | What those roles can do while they run. |
+
+### What the execution policy allows
+
+It allows the resource types of the `Dev` stages and nothing else. Every allowed action has a resource limit, in the account and the region of the stack.
+
+| Service | Allowed on | Notes |
+| --- | --- | --- |
+| API Gateway (HTTP APIs) | `/apis`, `/apis/*`, `/tags/*` | The five HTTP methods, and tag and untag. |
+| AppConfig | Any AppConfig resource of the account | Create, update, delete and get. Start and stop a deployment. |
+| CloudWatch | Alarms and dashboards with a name that starts with `lab-` | |
+| CodeDeploy | Applications and deployment groups with a name that starts with `lab-` | |
+| DynamoDB | Tables with a name that starts with `lab-` | Control plane only. The policy cannot read or write items. |
+| Lambda | Functions with a name that starts with `lab-` | `lambda:AddPermission` only for the principal `apigateway.amazonaws.com`. So a function cannot be made public. |
+| CloudWatch Logs | Log groups with a name that starts with `lab-`, and `aws/spans` | Resource policies for Transaction Search. |
+| SSM | Parameters under `/lab/` | Read and write. The bootstrap version parameter: read only. |
+| X-Ray | Transaction Search settings | |
+| S3 | The asset bucket of the bootstrap | `GetObject` only. Lambda reads the code of a function there. |
+| IAM | Roles with a name that starts with `lab-` | See the next section. |
+
+CloudFormation names every resource `<stack name>-<logical id>-<random>`, and the stacks of the lab start with `lab-`. So the name limit does not block a normal stack.
+A template that names a resource by hand, with a name that does not start with `lab-`, fails.
+
+Two explicit denies stay on top, because a deny wins over every allow:
+
+- **Protected identities.** Any IAM action on the roles `github-*`, `cdk-hnb659fds-*`, the roles of the single sign-on and `OrganizationAccountAccessRole`, on the two policies of this section, on OIDC and SAML providers, on users and on groups.
+- **One region.** Any action outside the region of the stack, except IAM, which is global.
+
+### Why a role must carry the boundary
+
+A template can create an IAM role. Without a limit, that role could have `AdministratorAccess`, and a Lambda function could then assume it. That would give back everything that the execution policy took away.
+
+So the execution policy allows `iam:CreateRole`, `iam:PutRolePermissionsBoundary`, `iam:PutRolePolicy` and `iam:UpdateAssumeRolePolicy` only when the request names the policy `lab-dev-boundary` as the boundary.
+`iam:AttachRolePolicy` has the same condition, and it allows only two managed policies: `AWSLambdaBasicExecutionRole` and `AWSCodeDeployRoleForLambdaLimited`.
+The policy never allows `iam:DeleteRolePermissionsBoundary`. A role keeps its boundary for its whole life.
+
+IAM gives a role the permissions that both the policies of the role and the boundary allow. The boundary allows what the services use today: write logs and traces, call an API of the lab, read a feature flag, use the tables of the lab, write the rollback floor of core, call the functions of the lab and move an alias.
+It has no `sts:AssumeRole`, no `iam:*` and no `cloudformation:*`, and it denies them. So the code of a preview cannot assume the CDK deploy role, even though the trust policy of that role accepts the account.
+
+### How a stack gets the boundary
+
+CDK adds a boundary to every role when the context key `@aws-cdk/core:permissionsBoundary` is set. The key needs an object: `{"name": "lab-dev-boundary"}`.
+The flag `-c key=value` gives a string, and CDK ignores a string. The file `cdk.json` of the user does work, and so the service repositories need no change.
+
+- A preview: the `build` job of `preview.yml` in lab-workflows writes `~/.cdk.json` before `cdk synth`.
+- A laptop: see "Deploy a service to dev from a laptop".
+
+The file is a convenience and not the protection. Code of a pull request can ignore it. In that case the execution policy refuses `iam:CreateRole`, and the deployment fails.
+
+### Apply it
+
+You need an administrator profile for the `dev` account. The order matters.
+
+```
+aws sso login --profile lab-dev
+
+# 1. Create the two policies. The stack deploys with your own credentials, not through the execution role.
+npx cdk deploy DevGuardrails -c environment=dev -c githubOwner=<owner> -c githubOwnerId=<owner id> --profile lab-dev
+
+# 2. Deploy the baseline stacks again with the boundary (see the next section), so their roles carry it.
+
+# 3. Bootstrap with the policy. The context values only stop the app from failing. Keep all other options.
+npx cdk bootstrap aws://<account id>/eu-west-2 -c environment=dev -c githubOwner=<owner> -c githubOwnerId=<owner id> \
+  --cloudformation-execution-policies arn:aws:iam::<account id>:policy/lab-dev-cfn-execution --profile lab-dev
+```
+
+Step 2 comes before step 3 on purpose. A role without the boundary cannot get a new policy through the execution role, and so a stack with such a role could not change.
+Look at the result: `aws iam list-attached-role-policies --role-name cdk-hnb659fds-cfn-exec-role-<account id>-eu-west-2 --profile lab-dev` must list `lab-dev-cfn-execution` and not `AdministratorAccess`.
+
+`DevGuardrails` and `Platform` use the CDK credentials synthesizer in `dev`. `cdk deploy` runs them with your credentials, and not with the bootstrap roles.
+So the execution policy never blocks them, and a change to the roles `github-*` needs no temporary bootstrap with `AdministratorAccess`.
+
+### Deploy a service to dev from a laptop
+
+A service repository does not set the boundary. Put the key in a `.cdk.json` in a temporary home folder, and run CDK with that home folder.
+The folder holds only that file, so the key does not leak into your work for other accounts.
+
+```
+tmp="$(mktemp -d)"
+echo '{"context":{"@aws-cdk/core:permissionsBoundary":{"name":"lab-dev-boundary"}}}' > "$tmp/.cdk.json"
+# The temporary home has no AWS profile, so give CDK the credentials of the profile.
+eval "$(aws configure export-credentials --profile lab-dev --format env)"
+export AWS_REGION=eu-west-2
+HOME="$tmp" npx cdk deploy -c dev=true -c namespace=my-test "Dev/*"
+rm -rf "$tmp"
+```
+
+On Windows, Node reads `USERPROFILE` and not `HOME`. Set both to the temporary folder.
+A `~/.cdk.json` in your real home folder also works. It then applies to every CDK deployment, also to other accounts. Those accounts have no such policy, so a role there fails.
+
+### Put the bootstrap back
+
+A re-bootstrap keeps the options of the last run. So `cdk bootstrap` without an option does **not** restore `AdministratorAccess`. Name the policy:
+
+```
+npx cdk bootstrap aws://<account id>/eu-west-2 -c environment=dev -c githubOwner=<owner> -c githubOwnerId=<owner id> \
+  --cloudformation-execution-policies arn:aws:iam::aws:policy/AdministratorAccess --profile lab-dev
+```
+
+While the role has `AdministratorAccess`, the guardrails do not protect the account. Apply the first command of "Apply it" again as soon as possible.
+
+### Change the policy
+
+The bootstrap names the policy by its ARN. So a change of the policy needs `cdk deploy DevGuardrails`, and no new bootstrap.
+
+1. Add the actions to `lib/dev-policies.ts`, with a resource limit. The test file `test/dev-guardrails.test.ts` checks the size and the shape.
+2. Run `npm test`. A managed policy can hold 6144 characters without white space. The execution policy is near that limit. If it does not fit, move a group of statements to a second policy and name both in the bootstrap command.
+3. Deploy with `npx cdk deploy DevGuardrails ...` and the administrator profile.
+
+To find the actions of a resource type, read the handler permissions: `aws cloudformation describe-type --type RESOURCE --type-name AWS::ApiGatewayV2::Stage --query Schema`. The lab added `apigateway:TagResource` this way, after a real failure.
+The AWS Budgets budget and the SNS topic of lab-platform#43 (option 3) need new statements here. They are not in the policy yet.
+
+### What the real runs showed
+
+| What | Result |
+| --- | --- |
+| The baseline stacks deployed again with the boundary (core, flags, account, web, catalogue), while the execution role still had `AdministratorAccess` | All ten roles of the stacks have the boundary. The three baseline URLs answer HTTP 200. |
+| After the bootstrap: the catalogue baseline with a new `version` value | `UPDATE_COMPLETE`. Lambda, alias, CodeDeploy, alarms and SSM went through the new policy. |
+| A copy of core with a namespace (DynamoDB table, three functions, the migration custom resource), then destroy | Created and destroyed. The first try failed on `apigateway:TagResource`. The policy has that action now. |
+| A copy of flags with a namespace (AppConfig), then destroy | Created and destroyed. |
+| A stack with an SQS queue | `CREATE_FAILED`: `not authorized to perform: sqs:createqueue ... no identity-based policy allows the action`. |
+| A stack with a role and no boundary | `CREATE_FAILED`: `not authorized to perform: iam:CreateRole`. |
+| A stack with an IAM user | `CREATE_FAILED`: `explicit deny in an identity-based policy: lab-dev-cfn-execution`. |
+| A stack with a role named `github-i43` | `CREATE_FAILED`: `explicit deny in an identity-based policy: lab-dev-cfn-execution`. |
+| A role with the boundary and an inline policy `Action: *, Resource: *` | Created. The policy simulator shows `sts:AssumeRole`, `iam:CreateUser` and `cloudformation:DeleteStack` as `explicitDeny`, and `sqs:CreateQueue` and `ec2:RunInstances` as `implicitDeny`, all with `AllowedByPermissionsBoundary: false`. |
+
+### What the guardrails do not stop
+
+- A template can still create the allowed types, with any name that starts with `lab-`. It can fill the account with Lambda functions or DynamoDB tables, and it can delete a baseline stack through the CDK deploy role. A budget (option 3) limits the cost.
+- A function of a preview can write the rollback floor parameter of core. It cannot write other parameters.
+- The policy does not limit the people with an administrator profile.
+- The accounts `test`, `staging` and `production` still have the default execution role. Only `dev` runs unreviewed code.
 
 ## The `workflowRef` context value
 
@@ -159,6 +304,7 @@ The pipeline logs in with a role that this repository creates. A change to that 
 | The OIDC provider (stack `Platform`) | The pipeline, but it cannot remove it | `DeletionPolicy: Retain` keeps the real provider if a change removes it from the template |
 | `github-platform-deploy`, the role of the pipeline (stack `PlatformRoot`) | A person, from a laptop | `cdk deploy PlatformRoot` with an administrator profile |
 | The `dev` account (stack `Platform`) | A person, from a laptop | `cdk deploy Platform` with the profile `lab-dev` |
+| The guardrails of the `dev` account (stack `DevGuardrails`) | A person, from a laptop | `cdk deploy DevGuardrails` with the profile `lab-dev` |
 | The CDK bootstrap roles | A person, from a laptop | `cdk bootstrap` |
 | The GitHub environments, the rulesets, the secrets | A person | The GitHub settings |
 
@@ -247,7 +393,7 @@ npx cdk deploy Platform -c environment=test -c githubOwner=<github-owner> -c git
 npx cdk deploy PlatformRoot -c environment=test -c githubOwner=<github-owner> -c githubOwnerId=<github-owner-id> --profile lab-test
 ```
 
-Do the same for `staging` and `production`, each with its own profile and its own `environment` value. The `dev` account has `Platform` only.
+Do the same for `staging` and `production`, each with its own profile and its own `environment` value. The `dev` account has `Platform` and `DevGuardrails`. Its guardrails need extra steps: see "The guardrails of the dev account".
 The profile selects the account, so make sure that the profile and the `environment` value match.
 
 An account can hold only one OIDC provider for GitHub. If the account already has one, the deployment fails.

@@ -111,7 +111,7 @@ jobs:
             stacks: lab-platform-production lab-platform-root-production
           - environment: dev
             secret: PR_ACCOUNT_ID_DEV
-            stacks: lab-platform-dev
+            stacks: lab-platform-dev lab-platform-dev-guardrails
     permissions:
       contents: read
       id-token: write
