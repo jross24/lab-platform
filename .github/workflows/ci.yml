@@ -94,6 +94,7 @@ jobs:
   # A delete or a replacement of a stateful resource (for example the lock table in test) fails the job
   # until the pull request has the label destructive-change-approved.
   diff:
+    name: diff ${{ matrix.environment }}
     if: ${{ github.event_name == 'pull_request' }}
     strategy:
       fail-fast: false
