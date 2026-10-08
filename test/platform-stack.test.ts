@@ -158,6 +158,16 @@ describe.each(ALL_ENVIRONMENTS)('PlatformStack for %s', (environment) => {
     );
   });
 
+  it('tags the resources that take a tag, so a person can see which repository manages them', () => {
+    const tag = { Key: 'lab-managed-by', Value: 'lab-platform' };
+    for (const type of ['AWS::IAM::Role', 'AWS::IAM::OIDCProvider']) {
+      for (const resource of Object.values(template.findResources(type))) {
+        expect(resource.Properties.Tags, type).toContainEqual(tag);
+      }
+    }
+    expect(stack.tags.tagValues()).toMatchObject({ 'lab-managed-by': 'lab-platform' });
+  });
+
   it('creates one native GitHub OIDC provider with the STS audience', () => {
     template.resourceCountIs('AWS::IAM::OIDCProvider', 1);
     template.hasResourceProperties('AWS::IAM::OIDCProvider', {

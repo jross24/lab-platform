@@ -1,4 +1,4 @@
-import { ArnFormat, CfnOutput, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { ArnFormat, CfnOutput, Duration, RemovalPolicy, Stack, Tags } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import type { Construct } from 'constructs';
@@ -36,6 +36,9 @@ export class PlatformStack extends Stack {
         'Shared platform of the pipeline lab: the GitHub OIDC login and the roles of the pipelines. Deployed by the pipeline of lab-platform.',
       terminationProtection: true,
     });
+
+    // Every resource that takes a tag shows which repository manages it. A tag changes a resource in place.
+    Tags.of(this).add('lab-managed-by', 'lab-platform');
 
     const provider = new iam.OidcProviderNative(this, 'GitHubOidcProvider', {
       url: `https://${GITHUB_ISSUER}`,
