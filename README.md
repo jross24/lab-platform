@@ -267,15 +267,23 @@ Do it before the pipeline deploys the resources. A plain deploy of the stack fai
 
 1. Check out the commit that has `lib/transaction-search.ts` and run `npm ci`.
 2. Make sure that the stack `Platform` of the account is up to date. `cdk diff Platform` must show only the two new resources, because an import cannot change other resources.
-3. Run the import with an administrator profile. The logical IDs are the same in every account. Use the account ID of the profile.
+3. Write the file `mapping.json`. It maps the logical IDs to the real identifiers. The logical IDs are the same in every account. Use the account ID of the profile.
+
+   ```
+   {
+     "TransactionSearchXRayCanWriteSpans50F3D9CC": { "PolicyName": "lab-xray-can-write-spans" },
+     "TransactionSearchConfig7812D3D6": { "AccountId": "<account id>" }
+   }
+   ```
+
+   Run the import with an administrator profile:
 
    ```
    npx cdk import Platform -c environment=<environment> -c githubOwner=<owner> -c githubOwnerId=<owner id> \
-     --resource-mapping-inline '{"TransactionSearchXRayCanWriteSpans50F3D9CC":{"PolicyName":"lab-xray-can-write-spans"},"TransactionSearchConfig7812D3D6":{"AccountId":"<account id>"}}' \
-     --profile lab-<environment>
+     --resource-mapping mapping.json --profile lab-<environment>
    ```
 
-   The command shows the resources, asks for confirmation, and makes a change set of type `IMPORT`. The stack gets the resources without any change to them.
+   The command shows the resources, asks for confirmation, and makes a change set of type `IMPORT`. Do not commit `mapping.json`: it holds an account ID. The stack gets the resources without any change to them.
 4. Run `cdk diff Platform` again. It must show no difference. Then check that the setting is still on:
    `aws xray get-trace-segment-destination --profile lab-<environment>` must show `"Destination": "CloudWatchLogs"` and `"Status": "ACTIVE"`.
 
