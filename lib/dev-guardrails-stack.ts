@@ -2,6 +2,7 @@ import { Aws, CliCredentialsStackSynthesizer, Stack, Tags } from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import type { Construct } from 'constructs';
 import type { Config } from './config.ts';
+import { DevBudget } from './dev-budget.ts';
 import {
   BOUNDARY_POLICY_NAME,
   EXECUTION_POLICY_NAME,
@@ -23,13 +24,14 @@ export class DevGuardrailsStack extends Stack {
     super(scope, 'DevGuardrails', {
       stackName: 'lab-platform-dev-guardrails',
       description:
-        'Guardrails of the dev account: the permissions boundary of the service roles and the execution policy of CloudFormation. Deployed by hand with an administrator profile.',
+        'Guardrails of the dev account: the permissions boundary of the service roles, the execution policy of CloudFormation and the monthly budget. Deployed by hand with an administrator profile.',
       terminationProtection: true,
       // The CDK CLI deploys with the credentials of the person. It assumes no bootstrap role and passes no execution
       // role to CloudFormation. It still needs the asset bucket of the bootstrap, so bootstrap the account first.
       synthesizer: new CliCredentialsStackSynthesizer(),
     });
-    Tags.of(this).add('lab-managed-by', 'lab-platform');
+    const tags = { 'lab-managed-by': 'lab-platform' };
+    for (const [key, value] of Object.entries(tags)) Tags.of(this).add(key, value);
 
     // Pseudo parameters, so the template has no account ID and works in any account.
     const ctx = { partition: Aws.PARTITION, account: Aws.ACCOUNT_ID, region: Aws.REGION };
@@ -44,6 +46,10 @@ export class DevGuardrailsStack extends Stack {
       description: 'Permissions of the CloudFormation execution role of the CDK bootstrap in the dev account.',
       document: toDocument(executionPolicy(ctx)),
     });
+
+    // The budget lives here and not in Platform. This stack deploys with the credentials of the person, so the
+    // execution policy needs no statement for Budgets or SNS, and it stays under its size limit.
+    new DevBudget(this, 'Budget', { tags });
   }
 }
 

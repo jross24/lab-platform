@@ -280,9 +280,14 @@ describe('DevGuardrailsStack', () => {
     ]);
   });
 
-  it('holds nothing else that costs money or grants access', () => {
+  it('holds nothing else that costs money or grants access, except the budget and its topic', () => {
     const types = new Set(Object.values(template.toJSON().Resources as Record<string, { Type: string }>).map((r) => r.Type));
-    expect([...types].sort()).toEqual(['AWS::IAM::ManagedPolicy']);
+    expect([...types].sort()).toEqual([
+      'AWS::Budgets::Budget',
+      'AWS::IAM::ManagedPolicy',
+      'AWS::SNS::Topic',
+      'AWS::SNS::TopicPolicy',
+    ]);
   });
 
   it('has no bootstrap version rule, so a later bootstrap version cannot block a deployment', () => {
