@@ -28,6 +28,6 @@ jobs:
           GITHUB_OWNER: ${{ github.repository_owner }}
           GITHUB_OWNER_ID: ${{ github.repository_owner_id }}
         run: |
-          for environment in test staging production; do
+          for environment in test staging production dev; do
             npx cdk synth --quiet -c "environment=$environment" -c "githubOwner=$GITHUB_OWNER" -c "githubOwnerId=$GITHUB_OWNER_ID"
           done
