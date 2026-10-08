@@ -481,8 +481,9 @@ How the step works:
 
 1. It assumes the CDK deploy role of the account (`cdk-hnb659fds-deploy-role-...`) and runs `aws cloudformation list-stack-resources`. The role of the pipeline can assume that role already, and it has CloudFormation read access. The pipeline gets **no new permission**.
 2. It reads `import/transaction-search.json`. The file maps the two logical IDs to the real identifiers: the policy name `lab-xray-can-write-spans`, and the account ID. The file is public, so it holds the text `{{account-id}}` and not the ID. The step puts in the ID of the account that it runs in.
-3. It runs `cdk import` without `--force`. CDK then refuses to import when the stack has other changes, because an import cannot change other resources. The job fails, and the stack stays as it was.
-4. CloudFormation makes a change set of type `IMPORT` and runs it with the execution role of the bootstrap. The resources are not changed. The destination stays `CloudWatchLogs` and `ACTIVE`.
+3. It runs `cdk import` with the credentials of the deploy role. This command reads the stack with its current credentials, and the role of the pipeline has no CloudFormation read access. The deploy role has it, and it can make and run a change set. No role changes.
+4. It passes no `--force` to `cdk import`. CDK then refuses to import when the stack has other changes, because an import cannot change other resources. The job fails, and the stack stays as it was.
+5. CloudFormation makes a change set of type `IMPORT` and runs it with the execution role of the bootstrap. The resources are not changed. The destination stays `CloudWatchLogs` and `ACTIVE`.
 
 **The step cannot ask the account if the resources exist.** The role of the pipeline cannot read CloudWatch Logs or X-Ray, and the pipeline must not widen its own role.
 CloudFormation checks it instead: it refuses an `IMPORT` change set with the text `Resource of type '...' with identifier '...' was not found`.
