@@ -30,7 +30,12 @@ export class PlatformStack extends Stack {
   constructor(scope: Construct, config: Config) {
     const { environment } = config;
     // A stack that holds the login of every pipeline must survive a wrong `cdk destroy`.
-    super(scope, 'Platform', { stackName: `lab-platform-${environment}`, terminationProtection: true });
+    super(scope, 'Platform', {
+      stackName: `lab-platform-${environment}`,
+      description:
+        'Shared platform of the pipeline lab: the GitHub OIDC login and the roles of the pipelines. Deployed by the pipeline of lab-platform.',
+      terminationProtection: true,
+    });
 
     const provider = new iam.OidcProviderNative(this, 'GitHubOidcProvider', {
       url: `https://${GITHUB_ISSUER}`,

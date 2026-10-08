@@ -152,6 +152,12 @@ describe.each(ALL_ENVIRONMENTS)('PlatformStack for %s', (environment) => {
     expect(stack.terminationProtection).toBe(true);
   });
 
+  it('has a description that says what the stack is for', () => {
+    expect(template.toJSON().Description).toBe(
+      'Shared platform of the pipeline lab: the GitHub OIDC login and the roles of the pipelines. Deployed by the pipeline of lab-platform.',
+    );
+  });
+
   it('creates one native GitHub OIDC provider with the STS audience', () => {
     template.resourceCountIs('AWS::IAM::OIDCProvider', 1);
     template.hasResourceProperties('AWS::IAM::OIDCProvider', {
