@@ -16,13 +16,11 @@ describe('createApp', { timeout: 30_000 }, () => {
     expect(stackNames('dev')).toEqual(['lab-platform-dev', 'lab-platform-dev-guardrails']);
   });
 
-  it('deploys the dev stacks with the credentials of the person, so the execution policy of dev cannot block them', () => {
+  it('deploys the guardrails stack with the credentials of the person, so the policy that it makes cannot block it', () => {
     const assembly = createApp({ environment: 'dev', githubOwner: 'jross24', githubOwnerId: '1001' }).synth();
-    for (const name of ['lab-platform-dev', 'lab-platform-dev-guardrails']) {
-      const stack = assembly.getStackByName(name);
-      expect(stack.cloudFormationExecutionRoleArn, name).toBeUndefined();
-      expect(stack.assumeRoleArn, name).toBeUndefined();
-    }
+    const guardrails = assembly.getStackByName('lab-platform-dev-guardrails');
+    expect(guardrails.cloudFormationExecutionRoleArn).toBeUndefined();
+    expect(guardrails.assumeRoleArn).toBeUndefined();
   });
 
   it.each(['test', 'staging', 'production'])('deploys the stacks of %s through the bootstrap roles', (environment) => {

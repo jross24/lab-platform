@@ -187,8 +187,8 @@ npx cdk bootstrap aws://<account id>/eu-west-2 -c environment=dev -c githubOwner
 Step 2 comes before step 3 on purpose. A role without the boundary cannot get a new policy through the execution role, and so a stack with such a role could not change.
 Look at the result: `aws iam list-attached-role-policies --role-name cdk-hnb659fds-cfn-exec-role-<account id>-eu-west-2 --profile lab-dev` must list `lab-dev-cfn-execution` and not `AdministratorAccess`.
 
-`DevGuardrails` and `Platform` use the CDK credentials synthesizer in `dev`. `cdk deploy` runs them with your credentials, and not with the bootstrap roles.
-So the execution policy never blocks them, and a change to the roles `github-*` needs no temporary bootstrap with `AdministratorAccess`.
+`DevGuardrails` uses the CDK credentials synthesizer. `cdk deploy` runs it with your own credentials and passes no execution role to CloudFormation. So the policy that the stack makes cannot block the stack.
+The stack `Platform` of `dev` is different: see "Change the platform stack of dev".
 
 ### Deploy a service to dev from a laptop
 
@@ -207,6 +207,20 @@ rm -rf "$tmp"
 
 On Windows, Node reads `USERPROFILE` and not `HOME`. Set both to the temporary folder.
 A `~/.cdk.json` in your real home folder also works. It then applies to every CDK deployment, also to other accounts. Those accounts have no such policy, so a role there fails.
+
+### Change the platform stack of dev
+
+The execution policy denies every IAM action on the roles `github-*` and on the OIDC provider. The stack `Platform` of `dev` holds exactly these resources.
+CloudFormation keeps the execution role that it first used for a stack, so `cdk deploy Platform` runs with the restricted policy too. A change to one of those resources fails with `explicit deny`, and the stack can end in `UPDATE_ROLLBACK_FAILED`.
+
+So a change to a `github-*` role or to the provider needs the steps below. Do them when no preview runs, because the account has no guardrail while the role has `AdministratorAccess`.
+
+1. Put the bootstrap back (next section).
+2. Run `npx cdk deploy Platform -c environment=dev -c githubOwner=<owner> -c githubOwnerId=<owner id> --profile lab-dev`.
+3. Apply step 3 of "Apply it" again.
+
+A change that touches no role or provider, for example a new resource of an allowed type, goes through the policy.
+If a deployment of `Platform` ends in `UPDATE_ROLLBACK_FAILED` because of the deny, run `aws cloudformation continue-update-rollback --stack-name lab-platform-dev --resources-to-skip <logical id of the failed resource> --profile lab-dev`. Skip only a resource that did not change.
 
 ### Put the bootstrap back
 
@@ -238,10 +252,13 @@ The AWS Budgets budget and the SNS topic of lab-platform#43 (option 3) need new 
 | After the bootstrap: the catalogue baseline with a new `version` value | `UPDATE_COMPLETE`. Lambda, alias, CodeDeploy, alarms and SSM went through the new policy. |
 | A copy of core with a namespace (DynamoDB table, three functions, the migration custom resource), then destroy | Created and destroyed. The first try failed on `apigateway:TagResource`. The policy has that action now. |
 | A copy of flags with a namespace (AppConfig), then destroy | Created and destroyed. |
+| A pull request preview of lab-svc-catalogue (label `preview`), then close without merge | The preview deployed through the new policy: [37850862914](https://github.com/jross24/lab-svc-catalogue/actions/runs/37850862914). Both of its roles carried the boundary. Closing the pull request destroyed the stack ([37851168973](https://github.com/jross24/lab-svc-catalogue/actions/runs/37851168973)): `DELETE_COMPLETE`, no role left. |
+| A change of a `github-*` role in `Platform` of `dev`, with the bootstrap put back to `AdministratorAccess` and then applied again | Both deployments worked. After the second `cdk bootstrap` the execution role had only `lab-dev-cfn-execution`. |
 | A stack with an SQS queue | `CREATE_FAILED`: `not authorized to perform: sqs:createqueue ... no identity-based policy allows the action`. |
 | A stack with a role and no boundary | `CREATE_FAILED`: `not authorized to perform: iam:CreateRole`. |
 | A stack with an IAM user | `CREATE_FAILED`: `explicit deny in an identity-based policy: lab-dev-cfn-execution`. |
 | A stack with a role named `github-i43` | `CREATE_FAILED`: `explicit deny in an identity-based policy: lab-dev-cfn-execution`. |
+| A tag added to the stack `Platform` of `dev`, deployed with `cdk deploy Platform` | `UPDATE_FAILED` on the OIDC provider: `not authorized to perform: iam:GetOpenIDConnectProvider ... explicit deny`. The stack went to `UPDATE_ROLLBACK_FAILED`, and `continue-update-rollback` with `--resources-to-skip` for the provider repaired it. No role or provider had changed. |
 | A role with the boundary and an inline policy `Action: *, Resource: *` | Created. The policy simulator shows `sts:AssumeRole`, `iam:CreateUser` and `cloudformation:DeleteStack` as `explicitDeny`, and `sqs:CreateQueue` and `ec2:RunInstances` as `implicitDeny`, all with `AllowedByPermissionsBoundary: false`. |
 
 ### What the guardrails do not stop
